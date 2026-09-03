@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: cursor-robot
+    runtime: python
+    plan: free
+    region: singapore
+    healthCheckPath: /health
+    buildCommand: pip install -r requirements.txt
+    startCommand: python cursor_bot_server.py
+    envVars:
+      - key: FEISHU_APP_ID
+        sync: false
+      - key: FEISHU_APP_SECRET
+        sync: false
+      - key: FEISHU_CHAT_ID
+        sync: false
+      - key: CURSOR_API_KEY
+        sync: false
+      - key: CURSOR_WEBHOOK_SECRET
+        sync: false
+      - key: POLL_INTERVAL
+        value: "30"
