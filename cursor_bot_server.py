@@ -176,6 +176,47 @@ def cursor_webhook():
     return jsonify({"status": "sent"}), 200
 
 
+# ====================== Local IDE Agent notify (Cursor hooks on each machine) ======================
+@app.route("/local-notify", methods=["POST"])
+def local_notify():
+    """Receive completion events from a per-machine Cursor stop hook."""
+    token = request.headers.get("X-Notify-Token", "")
+    secret = CURSOR_WEBHOOK_SECRET or ""
+    if not secret or len(token) != len(secret) or not hmac.compare_digest(token, secret):
+        return jsonify({"error": "unauthorized"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    raw_status = str(payload.get("status", "FINISHED")).upper()
+    status_map = {
+        "COMPLETED": "FINISHED",
+        "FINISHED": "FINISHED",
+        "ERROR": "ERROR",
+        "FAILED": "ERROR",
+    }
+    status = status_map.get(raw_status)
+    if not status:
+        return jsonify({"status": "ignored", "reason": raw_status}), 200
+
+    agent_id = payload.get("id") or payload.get("conversation_id") or "local-agent"
+    summary = payload.get("summary") or payload.get("model") or "本地 Cursor Agent 执行完成"
+    workspace = payload.get("workspace") or ""
+    if isinstance(payload.get("workspace_roots"), list) and payload["workspace_roots"]:
+        workspace = payload["workspace_roots"][0]
+    machine = payload.get("machine") or ""
+
+    card_payload = {
+        "id": agent_id,
+        "status": status,
+        "summary": summary if not machine else f"{summary}\n**机器:** {machine}",
+        "source": {"repository": workspace or "local", "ref": payload.get("ref", "")},
+        "target": {"url": payload.get("url", "https://cursor.com")}
+    }
+    print(f"[Local] 收到本地 Agent 通知: agent={agent_id}, status={status}")
+    card = build_cursor_card(card_payload)
+    send_card_to_chat(card)
+    return jsonify({"status": "sent"}), 200
+
+
 # ====================== 2. Cursor API 轮询（检测需要确认） ======================
 def poll_cursor_agents():
     """定时轮询 Cursor agent 列表，检测需要确认的状态"""
@@ -213,6 +254,13 @@ def poll_cursor_agents():
                     ["NEEDS_CONFIRMATION", "WAITING_CONFIRMATION", "PENDING_CONFIRMATION",
                      "AWAITING_INPUT", "NEEDS_INPUT", "BLOCKED"])
 
+                if prev_status is None:
+                    # First sighting: remember status only, do not notify historical agents.
+                    agent_status_cache[agent_id] = (
+                        "NEEDS_CONFIRMATION" if needs_confirmation else status
+                    )
+                    continue
+
                 if needs_confirmation and prev_status != "NEEDS_CONFIRMATION":
                     print(f"[轮询] 检测到需要确认: agent={agent_id}, status={status}")
                     agent_status_cache[agent_id] = "NEEDS_CONFIRMATION"
@@ -230,9 +278,22 @@ def poll_cursor_agents():
                     card = build_cursor_card(payload, status_label="需要确认")
                     send_card_to_chat(card)
 
-                elif status in ["FINISHED", "ERROR"] and prev_status not in [status, None]:
-                    # 轮询中也检测完成/错误，作为 webhook 的兜底
+                elif status in ["FINISHED", "ERROR"] and prev_status != status:
+                    # Fallback when Cursor does not send a webhook (e.g. agents started from the UI).
+                    print(f"[轮询] 检测到完成/错误: agent={agent_id}, status={status}")
                     agent_status_cache[agent_id] = status
+                    payload = {
+                        "id": agent_id,
+                        "status": status,
+                        "summary": agent.get("summary", agent.get("task", f"Agent 状态: {status}")),
+                        "source": agent.get("source", {}),
+                        "target": {
+                            "url": agent.get("url", f"https://cursor.com/agents?id={agent_id}"),
+                            "prUrl": agent.get("prUrl", agent.get("pr_url", ""))
+                        }
+                    }
+                    card = build_cursor_card(payload)
+                    send_card_to_chat(card)
 
                 elif status != prev_status and not needs_confirmation:
                     agent_status_cache[agent_id] = status
