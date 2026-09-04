@@ -85,6 +85,8 @@ Cursor 设置里搜索 Hooks，应能看到 `sessionStart`、`stop`、`beforeShe
 
 本功能更新了 hook，**已安装过的电脑需要再跑一次 `install.cmd`**。
 
+本地需要确认时：飞书卡片按钮 **或** 本机弹出的 Allow/Deny 窗口，**任一处操作即可**。为减少 Cursor 里再弹一次确认，安装脚本会写入 `~/.cursor/permissions.json`；建议在 Cursor Settings → Agents → Run Mode 选 **Allowlist** 或 **Run Everything**。
+
 ## Cloud Agent
 
 本地 hook 覆盖不了 Cloud Agent。从 Cursor 输入框选 **Cloud**，或打开 https://cursor.com/agents 启动。完成后由 Render 轮询发飞书。Webhook 文档：https://cursor.com/docs/cloud-agent/api/webhooks

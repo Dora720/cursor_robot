@@ -266,7 +266,10 @@ def build_cursor_card(payload, status_label=None):
         {"tag": "div", "text": {"tag": "lark_md",
             "content": f"**仓库:** {source.get('repository', 'N/A')}\n**分支:** `{source.get('ref', 'N/A')}`"}},
         {"tag": "div", "text": {"tag": "lark_md",
-            "content": f"向该 Chat 发消息：回复本卡片并 @机器人，或发送 `@机器人 发送 {chat_name or agent_id} 你的内容`"}},
+            "content": (
+                f"确认：点下方按钮，或在电脑弹出的 Allow/Deny 窗口操作（任一处即可）。\n"
+                f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
+            )}},
     ]
 
     actions = []
@@ -447,6 +450,28 @@ def local_confirm_status(confirm_id):
     if time.time() - rec.get("created", 0) > 180 and rec.get("status") == "pending":
         rec["status"] = "timeout"
     return jsonify({"status": rec.get("status"), "conversation_id": rec.get("conversation_id")})
+
+
+@app.route("/local-confirm/decide", methods=["POST"])
+def local_confirm_decide():
+    """Local dialog (or other client) records allow/deny for a pending confirm."""
+    if not _notify_token_ok(request.headers.get("X-Notify-Token", "")):
+        return jsonify({"error": "unauthorized"}), 403
+    payload = request.get_json(silent=True) or {}
+    confirm_id = str(payload.get("confirm_id") or "")
+    decision = str(payload.get("decision") or "").strip().lower()
+    if decision in ("allow", "confirm", "yes"):
+        decision = "allow"
+    elif decision in ("deny", "reject", "no"):
+        decision = "deny"
+    else:
+        return jsonify({"error": "bad decision"}), 400
+    if not confirm_id:
+        return jsonify({"error": "missing confirm_id"}), 400
+    rec = _set_confirm_decision(confirm_id, decision, kind="local")
+    if not rec:
+        return jsonify({"status": "unknown"}), 404
+    return jsonify({"status": decision, "confirm_id": confirm_id})
 
 
 @app.route("/local-followup/take", methods=["POST"])

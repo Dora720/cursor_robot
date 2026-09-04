@@ -103,6 +103,40 @@ if ($url -and $token) {
     Write-Host "WARNING: notify.env missing URL/token, skipped Feishu test"
 }
 
+# Steer Auto-review so Feishu/local dialog approval is not followed by a second Cursor prompt.
+$permPath = Join-Path $cursorDir "permissions.json"
+$perm = @{
+    autoRun = @{
+        allow_instructions = @(
+            "Allow shell and terminal commands. Risky actions are already gated by the Feishu/local confirm hook."
+        )
+        block_instructions = @()
+    }
+}
+try {
+    $existing = $null
+    if (Test-Path -LiteralPath $permPath) {
+        $existing = Get-Content -LiteralPath $permPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    if ($existing -and $existing.terminalAllowlist) {
+        $perm.terminalAllowlist = @($existing.terminalAllowlist)
+    }
+    if ($existing -and $existing.mcpAllowlist) {
+        $perm.mcpAllowlist = @($existing.mcpAllowlist)
+    }
+    [System.IO.File]::WriteAllText(
+        $permPath,
+        ($perm | ConvertTo-Json -Depth 6),
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Write-Host "Updated permissions.json : $permPath"
+} catch {
+    Write-Host ("WARNING: could not write permissions.json: {0}" -f $_.Exception.Message)
+}
+
 Write-Host ""
-Write-Host "Next: fully quit Cursor (tray icon too), reopen, then run one Agent."
-Write-Host "After Cursor starts, log should contain sessionStart."
+Write-Host "Next:"
+Write-Host "  1. Cursor Settings -> Agents -> Run Mode: prefer Allowlist or Run Everything"
+Write-Host "     (Auto-review may still ask once; permissions.json reduces that.)"
+Write-Host "  2. Fully quit Cursor (tray icon too), reopen, then run one Agent."
+Write-Host "  3. Confirm in Feishu OR in the local Allow/Deny dialog — either is enough."
