@@ -1,0 +1,5 @@
+1. Copy notify.env.example to notify.env and set NOTIFY_TOKEN (same as Render CURSOR_WEBHOOK_SECRET).
+2. Double-click install.cmd
+3. Confirm the printed computer name is this PC.
+4. Feishu should get an install-test card.
+5. Fully quit Cursor (tray icon too) and reopen, then run one Agent.

@@ -1,4 +1,6 @@
 .env
+notify.env
+feishu_hook_installer/notify.env
 .venv/
 __pycache__/
 *.pyc
