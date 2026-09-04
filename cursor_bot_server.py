@@ -123,6 +123,7 @@ def send_card_to_chat(card_content):
     """发送交互卡片到指定群"""
     token = get_tenant_access_token()
     conv_id = card_content.get("_conversation_id") or ""
+    confirm_id = card_content.get("_confirm_id") or ""
     public_card = {k: v for k, v in card_content.items() if not str(k).startswith("_")}
     resp = requests.post(
         "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
@@ -146,7 +147,63 @@ def send_card_to_chat(card_content):
         if msg_id and conv_id:
             with _store_lock:
                 feishu_msg_to_chat[msg_id] = conv_id
+                if confirm_id and confirm_id in pending_confirms:
+                    pending_confirms[confirm_id]["message_id"] = msg_id
     return result
+
+
+def patch_card_message(message_id, card_content):
+    """Update an already-sent interactive card (shared card / update_multi)."""
+    if not message_id:
+        return {"code": -1, "msg": "missing message_id"}
+    token = get_tenant_access_token()
+    public_card = {k: v for k, v in (card_content or {}).items() if not str(k).startswith("_")}
+    if "config" not in public_card:
+        public_card["config"] = {"wide_screen_mode": True, "update_multi": True}
+    else:
+        public_card["config"] = dict(public_card.get("config") or {})
+        public_card["config"]["update_multi"] = True
+    resp = requests.patch(
+        f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={"content": json.dumps(public_card, ensure_ascii=False)},
+        timeout=10,
+    )
+    try:
+        result = resp.json()
+    except Exception:
+        return {"code": -1, "msg": resp.text[:200]}
+    if result.get("code") != 0:
+        print(f"[飞书] 更新卡片失败: {result}", flush=True)
+    else:
+        print(f"[飞书] 卡片已更新 message_id={message_id}", flush=True)
+    return result
+
+
+def notify_confirm_resolved(confirm_id, decision, source=""):
+    """After Agent-window (or other) resolve, update Feishu card so the group sees it."""
+    with _store_lock:
+        rec = pending_confirms.get(confirm_id) or {}
+        message_id = rec.get("message_id") or ""
+    if not message_id:
+        # Fallback: plain text in group if we lost the card id.
+        tip = {
+            "allow": "已在 Cursor Agent 窗口确认，可继续。",
+            "deny": "已在 Cursor Agent 窗口拒绝。",
+            "cursor": "已在 Cursor Agent 窗口处理，无需再点飞书。",
+        }.get(decision, "确认状态已更新。")
+        if source:
+            tip = f"{tip}（来源：{source}）"
+        send_text_to_chat(tip)
+        return
+    card = _confirm_result_card(confirm_id, decision, applied=True, existing="")
+    # For cursor-handled case, prefer the "already in Agent" wording.
+    if decision == "cursor" or source in ("agent_window", "cursor"):
+        card = _confirm_result_card(confirm_id, decision, applied=False, existing="cursor")
+    patch_card_message(message_id, card)
 
 
 def _notify_token_ok(token):
@@ -440,6 +497,7 @@ def local_confirm_request():
             "kind": "local",
             "detail": detail,
             "created": time.time(),
+            "message_id": "",
         }
     card = build_cursor_card({
         "id": conversation_id,
@@ -451,6 +509,7 @@ def local_confirm_request():
         "source": {"repository": workspace or "local", "ref": ""},
         "target": {},
     }, status_label="需要确认")
+    card["_confirm_id"] = confirm_id
     send_card_to_chat(card)
     return jsonify({"confirm_id": confirm_id, "status": "pending", "auto_allow": False})
 
@@ -494,6 +553,20 @@ def local_confirm_decide():
     if not rec:
         return jsonify({"status": "unknown"}), 404
     final = decision if applied else existing
+    # Agent window resolved first -> notify Feishu group by updating the card.
+    if applied and final in ("cursor", "allow", "deny") and source in (
+        "agent_window",
+        "cursor",
+        "local",
+    ):
+        # Only push Feishu update for Agent-side wins (not Feishu button itself).
+        if source in ("agent_window", "cursor") or (
+            source == "local" and decision == "cursor"
+        ):
+            try:
+                notify_confirm_resolved(confirm_id, final, source=source)
+            except Exception as exc:
+                print(f"[Confirm] feishu notify failed: {exc}", flush=True)
     return jsonify({
         "status": final,
         "confirm_id": confirm_id,

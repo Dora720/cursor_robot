@@ -87,6 +87,7 @@ Cursor 设置里搜索 Hooks，应能看到 `sessionStart`、`stop`、`beforeShe
 
 本地需要确认时：**飞书** 与 **Cursor Agent 窗口** 平级同时出现，**先点的生效**（先到先生效）。
 - 任一方确认/拒绝后，另一端再操作会被忽略；飞书卡片会变成「已处理，无需再点」
+- 若在 **Cursor Agent 窗口**先操作，飞书原确认卡片会自动更新为「已在 Cursor 处理」
 - 无系统弹窗；也不用等飞书超时才出现 Agent 确认
 
 已装过的电脑请再跑一次 `install.cmd`，并完全退出 Cursor 后重开。
