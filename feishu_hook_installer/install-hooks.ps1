@@ -9,7 +9,7 @@ $cursorDir = Join-Path $env:USERPROFILE ".cursor"
 $hookDir = Join-Path $cursorDir "hooks"
 New-Item -ItemType Directory -Force -Path $hookDir | Out-Null
 
-foreach ($name in @("notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd", "confirm-feishu.ps1", "confirm-feishu.cmd")) {
+foreach ($name in @("notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd", "confirm-feishu.ps1", "confirm-feishu.cmd", "confirm-feishu-watch.ps1")) {
     $from = Join-Path $srcDir $name
     if (-not (Test-Path -LiteralPath $from)) {
         throw "Missing $from"
@@ -103,47 +103,31 @@ if ($url -and $token) {
     Write-Host "WARNING: notify.env missing URL/token, skipped Feishu test"
 }
 
-# Steer Auto-review so Feishu/local dialog approval is not followed by a second Cursor prompt.
-$permPath = Join-Path $cursorDir "permissions.json"
+# Do NOT add a broad terminalAllowlist here: peer confirm needs Agent ask UI to appear.
 $perm = @{
     autoRun = @{
-        allow_instructions = @(
-            "Allow all shell and terminal commands without asking. Human confirmation is already handled by Feishu or by the Cursor Agent approval UI from the confirm hook."
-        )
+        allow_instructions = @()
         block_instructions = @()
     }
-    # Broad prefixes so Allowlist mode does not re-ask after Feishu allow.
-    terminalAllowlist = @(
-        "git", "npm", "pnpm", "yarn", "node", "npx", "python", "py", "pip", "uv",
-        "cargo", "go", "dotnet", "java", "mvn", "gradle", "make", "cmake",
-        "curl", "wget", "ssh", "scp", "powershell", "pwsh", "cmd", "bash", "sh",
-        "mise", "direnv", "docker", "kubectl", "gh", "rg", "fd", "jq"
-    )
 }
 try {
-    $existing = $null
+    # Keep existing allowlists if user already customized them; only ensure file exists.
     if (Test-Path -LiteralPath $permPath) {
-        $existing = Get-Content -LiteralPath $permPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        Write-Host "Kept existing permissions.json : $permPath"
+    } else {
+        [System.IO.File]::WriteAllText(
+            $permPath,
+            ($perm | ConvertTo-Json -Depth 6),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        Write-Host "Created permissions.json : $permPath"
     }
-    if ($existing -and $existing.terminalAllowlist) {
-        $perm.terminalAllowlist = @($existing.terminalAllowlist)
-    }
-    if ($existing -and $existing.mcpAllowlist) {
-        $perm.mcpAllowlist = @($existing.mcpAllowlist)
-    }
-    [System.IO.File]::WriteAllText(
-        $permPath,
-        ($perm | ConvertTo-Json -Depth 6),
-        [System.Text.UTF8Encoding]::new($false)
-    )
-    Write-Host "Updated permissions.json : $permPath"
 } catch {
     Write-Host ("WARNING: could not write permissions.json: {0}" -f $_.Exception.Message)
 }
 
 Write-Host ""
 Write-Host "Next:"
-Write-Host "  1. Cursor Settings -> Agents -> Run Mode: prefer Allowlist or Run Everything"
-Write-Host "     (so Feishu allow is not followed by another Cursor prompt)"
-Write-Host "  2. Fully quit Cursor (tray icon too), reopen, then run one Agent."
-Write-Host "  3. Confirm in Feishu; if timed out, use the Agent window only (no OS popup)."
+Write-Host "  1. Fully quit Cursor (tray icon too), reopen."
+Write-Host "  2. Confirm is peer: Feishu button OR Cursor Agent window — either works."
+Write-Host "  3. Keep a Run Mode that still shows Agent approval UI when hook returns ask."

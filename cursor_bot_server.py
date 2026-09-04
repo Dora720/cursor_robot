@@ -269,9 +269,10 @@ def build_cursor_card(payload, status_label=None):
             "content": f"**仓库:** {source.get('repository', 'N/A')}\n**分支:** `{source.get('ref', 'N/A')}`"}},
         {"tag": "div", "text": {"tag": "lark_md",
             "content": (
-                f"确认方式（二选一即可）：\n"
-                f"1. 飞书点下方按钮 → 直接继续（无需再在 Cursor 确认）\n"
-                f"2. 不点飞书 → 等待结束后在 Cursor Agent 窗口确认\n"
+                f"确认方式（平级二选一，同时有效）：\n"
+                f"1. 飞书点下方按钮\n"
+                f"2. Cursor Agent 窗口里确认\n"
+                f"任意一方确认即可继续。\n"
                 f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
             )}},
     ]
