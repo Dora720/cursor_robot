@@ -2,7 +2,7 @@
 
 Cursor Agent 完成后或需要确认时，通过飞书应用机器人往指定群发卡片。卡片含 Chat 名称；可在飞书点「确认 / 拒绝」，也可回复卡片或 `@机器人 发送 <Chat名> 内容` 把消息发回对应 Chat。
 
-- 服务地址：https://cursor-robot.onrender.com
+- 作者示例服务：https://cursor-robot.onrender.com（其他人需换成自己的）
 - 仓库：https://github.com/Dora720/cursor_robot
 
 ## 它做什么
@@ -14,51 +14,62 @@ Cursor Agent 完成后或需要确认时，通过飞书应用机器人往指定�
 
 不要把 `.env`、`notify.env` 提交到 GitHub。
 
-## 部署 Render 服务
+## 其他人拿到代码要做什么
 
-当前服务已按免费套餐部署，控制台：https://dashboard.render.com/web/srv-dacmps95efls73f07q20
+**不能直接用仓库作者已部署好的 Render 或飞书应用。** 代码可以共用，账号、密钥、群、服务地址必须各自准备一套（除非对方把 Render 权限、飞书应用和密钥都分享给你）。
 
-新环境从零部署：
+拿到本仓库后，请按下面顺序自建：
 
-1. 用本仓库创建 Render **Web Service**，套餐选 **Free**。
-2. Start Command：
-
-```bash
-python -u cursor_bot_server.py
-```
-
-3. 在 Render 填环境变量（不要提交这些值）：
+1. **自己部署后端**（推荐 Render Free，或其他能跑 Python 的主机）  
+   - 用本仓库创建 Web Service，Start Command：`python -u cursor_bot_server.py`  
+   - 记下你的公网地址，例如 `https://你的服务.onrender.com`
+2. **自己创建飞书应用机器人**  
+   - 开通机器人能力并**发布**版本  
+   - 把机器人拉进你要收通知的群  
+   - 在开放平台配置事件回调到：`https://你的服务.onrender.com/feishu-callback`  
+   - 订阅 `card.action.trigger`、`im.message.receive_v1`  
+   - 权限：发消息；至少「接收 @机器人 的群消息」（不 @ 也要收消息再开「读取群组中所有消息」）
+3. **在 Render（或你的主机）填写自己的环境变量**（不要提交到 Git）
 
 | 变量 | 说明 |
 |---|---|
-| `FEISHU_APP_ID` | 飞书应用 ID |
-| `FEISHU_APP_SECRET` | 飞书应用密钥 |
-| `FEISHU_CHAT_ID` | 目标群 ID（`oc_` 开头） |
-| `CURSOR_API_KEY` | Cursor API Key，用于 Cloud Agent 轮询 |
-| `CURSOR_WEBHOOK_SECRET` | 本地 hook / webhook 共用密钥，建议不少于 32 位 |
+| `FEISHU_APP_ID` | 你的飞书应用 ID |
+| `FEISHU_APP_SECRET` | 你的飞书应用密钥 |
+| `FEISHU_CHAT_ID` | 你的目标群 ID（`oc_` 开头） |
+| `CURSOR_API_KEY` | 你的 Cursor API Key（仅 Cloud Agent 需要） |
+| `CURSOR_WEBHOOK_SECRET` | **自己生成**的共享密钥，建议 ≥32 位；不是 Cursor 控制台下发的固定值 |
 | `POLL_INTERVAL` | 可选，默认 `30` |
+| `FEISHU_VERIFICATION_TOKEN` | 可选，与飞书「Verification Token」一致 |
 
-仓库里的 `render.yaml`、`Procfile` 已按上述方式配置。推送到 `main` 后 Render 会自动部署。
+`CURSOR_WEBHOOK_SECRET` 用密码生成器或随机字符串即可。本地 hook 的 `NOTIFY_TOKEN` **必须与它相同**。
 
-4. 验证：
+4. **每台要用本地 Agent 的电脑安装 hook**  
+   - 拷贝 `feishu_hook_installer/`  
+   - `notify.env` 里 `NOTIFY_URL` 指向**你自己的**服务：`https://你的服务.onrender.com/local-notify`  
+   - `NOTIFY_TOKEN` = 你的 `CURSOR_WEBHOOK_SECRET`  
+   - 跑 `install.cmd`，再**完全退出** Cursor 后重开  
 
-- https://cursor-robot.onrender.com/health 应返回 `"status": "ok"`
-- https://cursor-robot.onrender.com/test 会往群里发一条测试卡片（无鉴权，仅排障时用）
+验证：打开 `https://你的服务.onrender.com/health` 应返回 `"status": "ok"`；`/test` 会往你的群发一条测试卡片。
 
-飞书应用需要开通机器人能力、已发布，并且机器人已在目标群里。
+上面 README 里出现的 `https://cursor-robot.onrender.com` 只是作者当前示例部署，**其他人请全部换成自己的地址**。
 
-要在飞书里点确认、以及从群里给 Chat 发消息，还要在飞书开放平台配置回调：
+## 部署 Render 服务
 
-1. 事件与回调 → 请求网址：`https://cursor-robot.onrender.com/feishu-callback`
-2. 订阅 `card.action.trigger`、`im.message.receive_v1`（或旧版「消息卡片请求网址」填同一 URL）
-3. 权限：发消息；至少「接收 @机器人 的群消息」。若要不 @ 也能收回复，再开「读取群组中所有消息」
-4. 发布新版本
+作者当前示例服务（仅供参考）：https://dashboard.render.com/web/srv-dacmps95efls73f07q20  
+示例地址：https://cursor-robot.onrender.com
+
+新环境从零部署步骤与上一节相同。仓库里的 `render.yaml`、`Procfile` 已写好启动方式；连上你自己的 GitHub 仓库并推送到 `main` 后，Render 可自动部署。
+
+部署后验证（把域名换成你的）：
+
+- `https://你的服务.onrender.com/health` → `"status": "ok"`
+- `https://你的服务.onrender.com/test` → 往群发测试卡片（无鉴权，仅排障）
+
+飞书回调请求网址示例：`https://你的服务.onrender.com/feishu-callback`
 
 飞书把话发回 **本地** Chat 时：先排队，再在该 Chat 下一轮 Agent 的 `stop` 时用 `followup_message` 注入。Agent 已结束的话，在同一 Chat 里再发一条任意消息即可。Cloud Agent 会立刻 followup。
 
-当前若只开了「收 @」，回复卡片时请 **@cursor消息**，否则飞书不会推事件。
-
-可选环境变量 `FEISHU_VERIFICATION_TOKEN`：与开放平台「Verification Token」一致。
+当前若只开了「收 @」，回复卡片时请 **@机器人**，否则飞书不会推事件。
 
 免费套餐约 15 分钟无请求会休眠，唤醒大约 1 分钟。本地 hook 超时是 120 秒，一般仍能发出。本机若还是旧 hook（没有 followup take），飞书回复进不了 Cursor，需再跑一次 `install.cmd`。
 
@@ -70,10 +81,11 @@ python -u cursor_bot_server.py
 2. 复制 `notify.env.example` 为 `notify.env`，填入：
 
 ```
-NOTIFY_URL=https://cursor-robot.onrender.com/local-notify
-NOTIFY_TOKEN=<与 Render 的 CURSOR_WEBHOOK_SECRET 相同>
+NOTIFY_URL=https://你的服务.onrender.com/local-notify
+NOTIFY_TOKEN=<与你的 Render CURSOR_WEBHOOK_SECRET 相同>
 ```
 
+（若你加入的是作者已分享密钥的同一套服务，才可使用作者的示例域名；默认请填自己的。）
 3. 双击 `install.cmd`。
 4. 确认窗口里的 `computer` 是这台电脑的名字，且 `test result` 含 `"status":"sent"`。群里应出现测试卡片。
 5. **完全退出** Cursor（托盘图标也退出）再打开。
