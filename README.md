@@ -51,12 +51,16 @@ python -u cursor_bot_server.py
 
 1. 事件与回调 → 请求网址：`https://cursor-robot.onrender.com/feishu-callback`
 2. 订阅 `card.action.trigger`、`im.message.receive_v1`（或旧版「消息卡片请求网址」填同一 URL）
-3. 权限：发消息、读取群消息 / 接收消息
+3. 权限：发消息；至少「接收 @机器人 的群消息」。若要不 @ 也能收回复，再开「读取群组中所有消息」
 4. 发布新版本
+
+飞书把话发回 **本地** Chat 时：先排队，再在该 Chat 下一轮 Agent 的 `stop` 时用 `followup_message` 注入。Agent 已结束的话，在同一 Chat 里再发一条任意消息即可。Cloud Agent 会立刻 followup。
+
+当前若只开了「收 @」，回复卡片时请 **@cursor消息**，否则飞书不会推事件。
 
 可选环境变量 `FEISHU_VERIFICATION_TOKEN`：与开放平台「Verification Token」一致。
 
-免费套餐约 15 分钟无请求会休眠，唤醒大约 1 分钟。本地 hook 超时是 120 秒，一般仍能发出。
+免费套餐约 15 分钟无请求会休眠，唤醒大约 1 分钟。本地 hook 超时是 120 秒，一般仍能发出。本机若还是旧 hook（没有 followup take），飞书回复进不了 Cursor，需再跑一次 `install.cmd`。
 
 ## 每台电脑安装本地 hook
 

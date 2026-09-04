@@ -83,6 +83,40 @@ def get_tenant_access_token():
     return _token_cache["token"]
 
 
+def send_text_to_chat(text, reply_to_message_id=""):
+    """Send a plain text message to the Feishu group (optional reply)."""
+    token = get_tenant_access_token()
+    content = json.dumps({"text": text}, ensure_ascii=False)
+    if reply_to_message_id:
+        resp = requests.post(
+            f"https://open.feishu.cn/open-apis/im/v1/messages/{reply_to_message_id}/reply",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"msg_type": "text", "content": content},
+            timeout=10,
+        )
+    else:
+        resp = requests.post(
+            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "receive_id": FEISHU_CHAT_ID,
+                "msg_type": "text",
+                "content": content,
+            },
+            timeout=10,
+        )
+    try:
+        return resp.json()
+    except Exception:
+        return {"code": -1, "msg": resp.text[:200]}
+
+
 def send_card_to_chat(card_content):
     """发送交互卡片到指定群"""
     token = get_tenant_access_token()
@@ -232,7 +266,7 @@ def build_cursor_card(payload, status_label=None):
         {"tag": "div", "text": {"tag": "lark_md",
             "content": f"**仓库:** {source.get('repository', 'N/A')}\n**分支:** `{source.get('ref', 'N/A')}`"}},
         {"tag": "div", "text": {"tag": "lark_md",
-            "content": f"向该 Chat 发消息：回复本卡片，或发送 `发送 {chat_name or agent_id} 你的内容`"}},
+            "content": f"向该 Chat 发消息：回复本卡片并 @机器人，或发送 `@机器人 发送 {chat_name or agent_id} 你的内容`"}},
     ]
 
     actions = []
@@ -447,7 +481,8 @@ def _set_confirm_decision(confirm_id, decision, agent_id="", kind=""):
     return rec
 
 
-def _resolve_chat_by_name(name):
+def _find_chat_id_by_name(name):
+    """Exact match on conversation_id or registered chat name. No fallback."""
     name = (name or "").strip()
     if not name:
         return ""
@@ -455,11 +490,17 @@ def _resolve_chat_by_name(name):
         if name in chat_registry:
             return name
         for cid, meta in chat_registry.items():
-            if name == (meta.get("name") or "") or name in cid:
+            if name == (meta.get("name") or ""):
                 return cid
-        if last_active_chat.get("id"):
-            return last_active_chat["id"]
     return ""
+
+
+def _resolve_chat_by_name(name):
+    found = _find_chat_id_by_name(name)
+    if found:
+        return found
+    with _store_lock:
+        return last_active_chat.get("id") or ""
 
 
 def _handle_feishu_card_action(body):
@@ -513,26 +554,57 @@ def _handle_feishu_im_message(event):
     if not text:
         return
     conversation_id = ""
-    parent_id = message.get("parent_id") or message.get("root_id") or ""
-    if parent_id:
-        with _store_lock:
+    parent_id = message.get("parent_id") or ""
+    root_id = message.get("root_id") or ""
+    with _store_lock:
+        if parent_id:
             conversation_id = feishu_msg_to_chat.get(parent_id, "")
+        if not conversation_id and root_id:
+            conversation_id = feishu_msg_to_chat.get(root_id, "")
     m = re.match(r"^(?:发送|send)\s+(\S+)\s+(.+)$", text, re.I | re.S)
     if m:
-        conversation_id = _resolve_chat_by_name(m.group(1))
+        conversation_id = _find_chat_id_by_name(m.group(1)) or _resolve_chat_by_name(m.group(1))
         text = m.group(2).strip()
     elif not conversation_id:
-        conversation_id = _resolve_chat_by_name(text.split()[0]) if " " in text else last_active_chat.get("id")
-        if conversation_id and text.startswith("发送"):
-            text = text.split(None, 2)[-1] if len(text.split()) > 2 else text
+        first = text.split()[0] if text.split() else ""
+        named = _find_chat_id_by_name(first)
+        if named:
+            conversation_id = named
+            rest = text.split(None, 1)
+            if len(rest) > 1:
+                text = rest[1]
+        else:
+            conversation_id = last_active_chat.get("id") or ""
+    # Reply to our card but mapping lost after Render restart/sleep.
+    if not conversation_id and (parent_id or root_id):
+        conversation_id = last_active_chat.get("id") or ""
     if not conversation_id:
         print(f"[FeishuMsg] no target chat for: {text[:80]}", flush=True)
+        send_text_to_chat(
+            "未找到对应 Cursor Chat。请回复通知卡片，或发送：发送 <Chat名> 内容",
+            reply_to_message_id=message.get("message_id") or "",
+        )
         return
     kind = "local"
+    chat_name = ""
     with _store_lock:
-        kind = (chat_registry.get(conversation_id) or {}).get("kind") or "local"
+        meta = chat_registry.get(conversation_id) or {}
+        kind = meta.get("kind") or "local"
+        chat_name = meta.get("name") or conversation_id
     ok = enqueue_followup(conversation_id, text, kind=kind)
     print(f"[FeishuMsg] to={conversation_id} kind={kind} ok={ok} text={text[:80]}", flush=True)
+    if ok:
+        if kind == "cloud":
+            tip = f"已发给 Cloud Agent Chat：{chat_name}"
+        else:
+            tip = (
+                f"已排队到本地 Chat：{chat_name}\n"
+                "请在该 Cursor Chat 里再发一条消息（或等当前回合结束），"
+                "stop hook 会把飞书内容注入为 followup。"
+            )
+    else:
+        tip = f"排队失败：{chat_name}"
+    send_text_to_chat(tip, reply_to_message_id=message.get("message_id") or "")
 
 
 @app.route("/feishu-callback", methods=["POST"])
