@@ -1,16 +1,16 @@
 # cursor_robot
 
-Cursor Agent 完成后（或 Cloud Agent 需要确认时），通过飞书应用机器人往指定群发卡片。
+Cursor Agent 完成后或需要确认时，通过飞书应用机器人往指定群发卡片。卡片含 Chat 名称；可在飞书点「确认 / 拒绝」，也可回复卡片或 `@机器人 发送 <Chat名> 内容` 把消息发回对应 Chat。
 
 - 服务地址：https://cursor-robot.onrender.com
 - 仓库：https://github.com/Dora720/cursor_robot
 
 ## 它做什么
 
-1. **本地 Agent**：每台电脑安装 Cursor hook。Agent 一轮结束时，hook 通知 Render，再发飞书。
-2. **Cloud Agent**：Render 服务轮询 Cursor API，完成 / 失败 / 需要确认时发飞书。
+1. **本地 Agent**：每台电脑安装 Cursor hook。结束时通知飞书；执行命令前可在飞书确认；飞书回复会在下一轮 Agent 作为 followup 注入。
+2. **Cloud Agent**：Render 轮询完成 / 失败 / 需要确认；飞书确认会调用 Cursor followup / stop；飞书发的文字会立刻 followup。
 
-本地 Agent 的事件只存在于那台电脑，所以每台要跑本地 Agent 的机器都要装一次 hook。飞书文案、Cloud Agent 逻辑只在服务器上，改完推 GitHub 即可，不用重装 hook。
+本地 Agent 的事件只存在于那台电脑，所以每台要跑本地 Agent 的机器都要装一次 hook。只改飞书文案或 Cloud Agent 逻辑时推 GitHub 即可；改本地何时确认 / 注入消息时要重装 hook。
 
 不要把 `.env`、`notify.env` 提交到 GitHub。
 
@@ -47,6 +47,15 @@ python -u cursor_bot_server.py
 
 飞书应用需要开通机器人能力、已发布，并且机器人已在目标群里。
 
+要在飞书里点确认、以及从群里给 Chat 发消息，还要在飞书开放平台配置回调：
+
+1. 事件与回调 → 请求网址：`https://cursor-robot.onrender.com/feishu-callback`
+2. 订阅 `card.action.trigger`、`im.message.receive_v1`（或旧版「消息卡片请求网址」填同一 URL）
+3. 权限：发消息、读取群消息 / 接收消息
+4. 发布新版本
+
+可选环境变量 `FEISHU_VERIFICATION_TOKEN`：与开放平台「Verification Token」一致。
+
 免费套餐约 15 分钟无请求会休眠，唤醒大约 1 分钟。本地 hook 超时是 120 秒，一般仍能发出。
 
 ## 每台电脑安装本地 hook
@@ -68,7 +77,9 @@ NOTIFY_TOKEN=<与 Render 的 CURSOR_WEBHOOK_SECRET 相同>
 
 日志：`%USERPROFILE%\.cursor\hooks\notify-feishu.log`
 
-Cursor 设置里搜索 Hooks，应能看到 `sessionStart` 和 `stop`。
+Cursor 设置里搜索 Hooks，应能看到 `sessionStart`、`stop`、`beforeShellExecution`。
+
+本功能更新了 hook，**已安装过的电脑需要再跑一次 `install.cmd`**。
 
 ## Cloud Agent
 

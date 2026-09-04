@@ -96,14 +96,20 @@ $id = [string]$data.conversation_id
 if (-not $id) { $id = [string]$data.session_id }
 if (-not $id) { $id = "local-agent" }
 
-# ASCII-only payload. Chinese text is composed on the server to avoid GBK mojibake.
+$chatName = [string]$data.conversation_title
+if (-not $chatName) { $chatName = [string]$data.title }
+if (-not $chatName -and $workspace) { $chatName = Split-Path -Path $workspace -Leaf }
+
+# Do not put Chinese literals in this script (Windows PowerShell file encoding).
 $bodyObj = @{
-    event     = "statusChange"
-    id        = $id
-    status    = $status
-    machine   = $env:COMPUTERNAME
-    workspace = $workspace
-    model     = $model
+    event           = "statusChange"
+    id              = $id
+    conversation_id = $id
+    status          = $status
+    machine         = $env:COMPUTERNAME
+    workspace       = $workspace
+    model           = $model
+    chat_name       = $chatName
 }
 $json = $bodyObj | ConvertTo-Json -Compress
 Write-Log ("post {0} id={1} status={2}" -f $url, $id, $status)
@@ -132,5 +138,25 @@ if (-not $ok) {
 }
 
 Write-Log ("done ok={0}" -f $ok)
-Write-Output "{}"
+
+$followText = ""
+try {
+    $takeUrl = $url -replace "/local-notify$", "/local-followup/take"
+    $takeBody = @{ conversation_id = $id; id = $id } | ConvertTo-Json -Compress
+    $takeTmp = Join-Path $env:TEMP "cursor-feishu-followup.json"
+    [System.IO.File]::WriteAllText($takeTmp, $takeBody, [System.Text.UTF8Encoding]::new($false))
+    $takeOut = & curl.exe -sS -m 20 -X POST $takeUrl -H "Content-Type: application/json" -H "X-Notify-Token: $token" --data-binary "@$takeTmp" 2>&1
+    Write-Log ("followup take: {0}" -f $takeOut)
+    $takeParsed = $takeOut | ConvertFrom-Json
+    $followText = [string]$takeParsed.text
+} catch {
+    Write-Log ("followup take failed: {0}" -f $_.Exception.Message)
+}
+
+if ($followText) {
+    $outObj = @{ followup_message = $followText }
+    Write-Output ($outObj | ConvertTo-Json -Compress)
+} else {
+    Write-Output "{}"
+}
 exit 0

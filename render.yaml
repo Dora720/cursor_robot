@@ -20,3 +20,5 @@ services:
         sync: false
       - key: POLL_INTERVAL
         value: "30"
+      - key: FEISHU_VERIFICATION_TOKEN
+        sync: false

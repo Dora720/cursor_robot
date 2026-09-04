@@ -9,7 +9,7 @@ $cursorDir = Join-Path $env:USERPROFILE ".cursor"
 $hookDir = Join-Path $cursorDir "hooks"
 New-Item -ItemType Directory -Force -Path $hookDir | Out-Null
 
-foreach ($name in @("notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd")) {
+foreach ($name in @("notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd", "confirm-feishu.ps1", "confirm-feishu.cmd")) {
     $from = Join-Path $srcDir $name
     if (-not (Test-Path -LiteralPath $from)) {
         throw "Missing $from"
@@ -32,6 +32,7 @@ if (Test-Path -LiteralPath $envSrc) {
 
 $ping = Join-Path $hookDir "ping-hook.cmd"
 $notify = Join-Path $hookDir "notify-feishu.cmd"
+$confirm = Join-Path $hookDir "confirm-feishu.cmd"
 $hooksJson = Join-Path $cursorDir "hooks.json"
 $config = @{
     version = 1
@@ -41,6 +42,12 @@ $config = @{
         )
         stop = @(
             @{ command = "cmd.exe /c `"$notify`""; timeout = 120 }
+        )
+        beforeShellExecution = @(
+            @{ command = "cmd.exe /c `"$confirm`""; timeout = 120 }
+        )
+        preToolUse = @(
+            @{ command = "cmd.exe /c `"$confirm`""; matcher = "Task"; timeout = 120 }
         )
     }
 }
