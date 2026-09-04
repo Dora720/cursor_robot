@@ -61,6 +61,8 @@ pending_confirms = {}       # confirm_id -> record
 pending_followups = {}      # conversation_id -> [text, ...]
 feishu_msg_to_chat = {}     # feishu message_id -> conversation_id
 last_active_chat = {"id": ""}
+# conversation_id -> unix expiry; recent Feishu allow skips another card
+auto_allow_until = {}
 
 
 # ====================== 飞书 API 封装 ======================
@@ -267,8 +269,9 @@ def build_cursor_card(payload, status_label=None):
             "content": f"**仓库:** {source.get('repository', 'N/A')}\n**分支:** `{source.get('ref', 'N/A')}`"}},
         {"tag": "div", "text": {"tag": "lark_md",
             "content": (
-                f"确认：在飞书点下方按钮即可（不必再在 Cursor 确认）。\n"
-                f"若未在飞书确认，可在 Cursor Agent 窗口按提示操作。\n"
+                f"确认方式（二选一即可）：\n"
+                f"1. 飞书点下方按钮 → 直接继续（无需再在 Cursor 确认）\n"
+                f"2. 不点飞书 → 等待结束后在 Cursor Agent 窗口确认\n"
                 f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
             )}},
     ]
@@ -416,8 +419,22 @@ def local_confirm_request():
     chat_name = _chat_name_from(payload, workspace)
     machine = payload.get("machine") or ""
     detail = payload.get("detail") or payload.get("command") or payload.get("tool") or "需要确认的操作"
-    confirm_id = uuid.uuid4().hex[:16]
     _register_chat(conversation_id, name=chat_name, machine=machine, kind="local", workspace=workspace)
+
+    with _store_lock:
+        until = auto_allow_until.get(conversation_id) or 0
+        if until > time.time():
+            confirm_id = uuid.uuid4().hex[:16]
+            pending_confirms[confirm_id] = {
+                "status": "allow",
+                "conversation_id": conversation_id,
+                "kind": "local",
+                "detail": detail,
+                "created": time.time(),
+            }
+            return jsonify({"confirm_id": confirm_id, "status": "allow", "auto_allow": True})
+
+    confirm_id = uuid.uuid4().hex[:16]
     with _store_lock:
         pending_confirms[confirm_id] = {
             "status": "pending",
@@ -437,7 +454,7 @@ def local_confirm_request():
         "target": {},
     }, status_label="需要确认")
     send_card_to_chat(card)
-    return jsonify({"confirm_id": confirm_id, "status": "pending"})
+    return jsonify({"confirm_id": confirm_id, "status": "pending", "auto_allow": False})
 
 
 @app.route("/local-confirm/status/<confirm_id>", methods=["GET"])
@@ -455,7 +472,7 @@ def local_confirm_status(confirm_id):
 
 @app.route("/local-confirm/decide", methods=["POST"])
 def local_confirm_decide():
-    """Local dialog (or other client) records allow/deny for a pending confirm."""
+    """Record allow/deny from Feishu, local client, or handoff to Cursor Agent."""
     if not _notify_token_ok(request.headers.get("X-Notify-Token", "")):
         return jsonify({"error": "unauthorized"}), 403
     payload = request.get_json(silent=True) or {}
@@ -465,10 +482,22 @@ def local_confirm_decide():
         decision = "allow"
     elif decision in ("deny", "reject", "no"):
         decision = "deny"
+    elif decision in ("cursor", "ask", "deferred"):
+        decision = "cursor"
     else:
         return jsonify({"error": "bad decision"}), 400
     if not confirm_id:
         return jsonify({"error": "missing confirm_id"}), 400
+
+    if decision == "cursor":
+        with _store_lock:
+            rec = pending_confirms.get(confirm_id)
+            if not rec:
+                return jsonify({"status": "unknown"}), 404
+            if rec.get("status") == "pending":
+                rec["status"] = "cursor"
+        return jsonify({"status": "cursor", "confirm_id": confirm_id})
+
     rec = _set_confirm_decision(confirm_id, decision, kind="local")
     if not rec:
         return jsonify({"status": "unknown"}), 404
@@ -494,6 +523,11 @@ def _set_confirm_decision(confirm_id, decision, agent_id="", kind=""):
         rec = pending_confirms.get(confirm_id)
         if rec:
             rec["status"] = decision
+            if decision == "allow":
+                conv = rec.get("conversation_id") or agent_id
+                if conv:
+                    # Skip re-prompting Feishu briefly after an allow (retry / double gate).
+                    auto_allow_until[conv] = time.time() + 180
     if kind == "cloud" or (rec and rec.get("kind") == "cloud"):
         target_id = agent_id or (rec or {}).get("conversation_id")
 

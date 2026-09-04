@@ -1,5 +1,5 @@
-# Ask Feishu to confirm a local tool/shell action, then return Cursor hook JSON.
-# No OS popup — Cursor-side approval stays in the Agent window (permission: ask).
+# Confirm via Feishu (wait) OR Cursor Agent window (ask after timeout / if Feishu unreachable).
+# No OS popup. Feishu allow => permission allow. Timeout => permission ask (Agent window).
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -28,7 +28,6 @@ function Read-HookInput {
 }
 
 function Write-Perm([string]$perm) {
-    # Only JSON on stdout — Cursor parses this as the hook result.
     [Console]::Out.WriteLine(('{{"permission":"{0}","continue":true}}' -f $perm))
 }
 
@@ -50,6 +49,7 @@ try {
 $configPath = Join-Path $hookDir "notify.env"
 $url = ""
 $token = ""
+$waitSeconds = 90
 Get-Content -LiteralPath $configPath -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object {
     $line = $_.Trim().TrimStart([char]0xFEFF)
     if ($line -and -not $line.StartsWith("#") -and $line.Contains("=")) {
@@ -58,10 +58,14 @@ Get-Content -LiteralPath $configPath -Encoding UTF8 -ErrorAction SilentlyContinu
         $v = $line.Substring($i + 1).Trim()
         if ($k -eq "NOTIFY_URL") { $url = $v }
         if ($k -eq "NOTIFY_TOKEN") { $token = $v }
+        if ($k -eq "CONFIRM_WAIT_SECONDS") {
+            $n = 0
+            if ([int]::TryParse($v, [ref]$n) -and $n -ge 0) { $waitSeconds = $n }
+        }
     }
 }
 if (-not $url -or -not $token) {
-    Write-Log "confirm missing notify.env"
+    Write-Log "confirm missing notify.env -> Agent window ask"
     Write-Perm "ask"
     exit 0
 }
@@ -94,31 +98,58 @@ $reqOut = & curl.exe -sS -m 30 -X POST $reqUrl -H "Content-Type: application/jso
 Write-Log ("confirm request: {0}" -f $reqOut)
 
 $confirmId = ""
+$autoAllow = $false
 try {
     $reqParsed = $reqOut | ConvertFrom-Json
     $confirmId = [string]$reqParsed.confirm_id
+    if ($reqParsed.auto_allow -eq $true -or [string]$reqParsed.status -eq "allow") {
+        $autoAllow = $true
+    }
 } catch {}
+
+if ($autoAllow) {
+    Write-Log "confirm auto_allow from server"
+    Write-Perm "allow"
+    exit 0
+}
 if (-not $confirmId) {
+    Write-Log "confirm_id missing -> Agent window ask"
+    Write-Perm "ask"
+    exit 0
+}
+
+# waitSeconds=0 => skip Feishu wait, use Agent window only (card still sent).
+if ($waitSeconds -le 0) {
+    Write-Log "CONFIRM_WAIT_SECONDS=0 -> Agent window ask"
     Write-Perm "ask"
     exit 0
 }
 
 $statusUrl = ($url -replace "/local-notify$", "/local-confirm/status/") + $confirmId
-$deadline = (Get-Date).AddSeconds(100)
+$deadline = (Get-Date).AddSeconds($waitSeconds)
 $decision = "pending"
 while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Seconds 2
-    $stOut = & curl.exe -sS -m 10 -H "X-Notify-Token: $token" $statusUrl 2>&1
+    Start-Sleep -Seconds 1
+    $stOut = & curl.exe -sS -m 8 -H "X-Notify-Token: $token" $statusUrl 2>&1
     try {
         $st = $stOut | ConvertFrom-Json
         $decision = [string]$st.status
     } catch { $decision = "pending" }
     if ($decision -and $decision -ne "pending" -and $decision -ne "unknown") { break }
 }
-Write-Log ("confirm decision={0} id={1}" -f $decision, $confirmId)
+Write-Log ("confirm decision={0} id={1} waited={2}s" -f $decision, $confirmId, $waitSeconds)
 
-# Feishu allow/deny is enough. On timeout, fall back to Agent-window ask (no OS popup).
 if ($decision -eq "allow") { Write-Perm "allow"; exit 0 }
 if ($decision -eq "deny") { Write-Perm "deny"; exit 0 }
+
+# Feishu not answered: hand off to Cursor Agent window confirm.
+try {
+    $pushUrl = $url -replace "/local-notify$", "/local-confirm/decide"
+    $pushObj = @{ confirm_id = $confirmId; decision = "cursor" } | ConvertTo-Json -Compress
+    $pushTmp = Join-Path $env:TEMP "cursor-feishu-confirm-cursor.json"
+    [System.IO.File]::WriteAllText($pushTmp, $pushObj, [System.Text.UTF8Encoding]::new($false))
+    $null = & curl.exe -sS -m 8 -X POST $pushUrl -H "Content-Type: application/json" -H "X-Notify-Token: $token" --data-binary "@$pushTmp" 2>&1
+} catch {}
+
 Write-Perm "ask"
 exit 0

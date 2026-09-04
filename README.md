@@ -85,7 +85,11 @@ Cursor 设置里搜索 Hooks，应能看到 `sessionStart`、`stop`、`beforeShe
 
 本功能更新了 hook，**已安装过的电脑需要再跑一次 `install.cmd`**。
 
-本地需要确认时：优先在**飞书**点确认/拒绝；飞书确认后不应再要求 Cursor 确认。若飞书超时未操作，才回落到 **Cursor Agent 窗口**里的原生确认（不会弹系统窗口）。建议 Settings → Agents → Run Mode 选 **Allowlist** 或 **Run Everything**，避免飞书已确认后 Auto-review 再问一次。
+本地需要确认时：**飞书按钮** 或 **Cursor Agent 窗口**，二选一即可（无系统弹窗）。
+- 飞书点确认 → hook 返回 allow，应直接继续（请把 Run Mode 设为 Allowlist / Run Everything，避免 Auto-review 再问一次）
+- 飞书一直不点 → 约 90 秒后回落到 Agent 窗口确认（可用 `CONFIRM_WAIT_SECONDS` 调整；`0` = 只走 Agent 窗口）
+
+安装脚本会写入 `~/.cursor/permissions.json`。已装过的电脑请再跑一次 `install.cmd`。
 
 ## Cloud Agent
 

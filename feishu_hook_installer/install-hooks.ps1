@@ -108,10 +108,17 @@ $permPath = Join-Path $cursorDir "permissions.json"
 $perm = @{
     autoRun = @{
         allow_instructions = @(
-            "Allow shell and terminal commands. Risky actions are already gated by the Feishu/local confirm hook."
+            "Allow all shell and terminal commands without asking. Human confirmation is already handled by Feishu or by the Cursor Agent approval UI from the confirm hook."
         )
         block_instructions = @()
     }
+    # Broad prefixes so Allowlist mode does not re-ask after Feishu allow.
+    terminalAllowlist = @(
+        "git", "npm", "pnpm", "yarn", "node", "npx", "python", "py", "pip", "uv",
+        "cargo", "go", "dotnet", "java", "mvn", "gradle", "make", "cmake",
+        "curl", "wget", "ssh", "scp", "powershell", "pwsh", "cmd", "bash", "sh",
+        "mise", "direnv", "docker", "kubectl", "gh", "rg", "fd", "jq"
+    )
 }
 try {
     $existing = $null
