@@ -111,8 +111,9 @@ if ($autoAllow) {
 }
 
 # Always open Agent-window confirm immediately (peer with Feishu).
-if ($confirmId) {
+    if ($confirmId) {
     $statusUrl = ($url -replace "/local-notify$", "/local-confirm/status/") + $confirmId
+    $decideUrl = $url -replace "/local-notify$", "/local-confirm/decide"
     $watchPs1 = Join-Path $hookDir "confirm-feishu-watch.ps1"
     if (Test-Path -LiteralPath $watchPs1) {
         $arg = @(
@@ -122,6 +123,7 @@ if ($confirmId) {
             "-ConfirmId", $confirmId,
             "-StatusUrl", $statusUrl,
             "-Token", $token,
+            "-DecideUrl", $decideUrl,
             "-LogPath", $logPath,
             "-TimeoutSec", "120"
         )

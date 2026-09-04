@@ -269,10 +269,7 @@ def build_cursor_card(payload, status_label=None):
             "content": f"**仓库:** {source.get('repository', 'N/A')}\n**分支:** `{source.get('ref', 'N/A')}`"}},
         {"tag": "div", "text": {"tag": "lark_md",
             "content": (
-                f"确认方式（平级二选一，同时有效）：\n"
-                f"1. 飞书点下方按钮\n"
-                f"2. Cursor Agent 窗口里确认\n"
-                f"任意一方确认即可继续。\n"
+                f"确认方式（平级二选一）：飞书按钮 或 Cursor Agent 窗口，**先点的生效**，另一端再点无效。\n"
                 f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
             )}},
     ]
@@ -479,6 +476,7 @@ def local_confirm_decide():
     payload = request.get_json(silent=True) or {}
     confirm_id = str(payload.get("confirm_id") or "")
     decision = str(payload.get("decision") or "").strip().lower()
+    source = str(payload.get("source") or "local")
     if decision in ("allow", "confirm", "yes"):
         decision = "allow"
     elif decision in ("deny", "reject", "no"):
@@ -490,19 +488,18 @@ def local_confirm_decide():
     if not confirm_id:
         return jsonify({"error": "missing confirm_id"}), 400
 
-    if decision == "cursor":
-        with _store_lock:
-            rec = pending_confirms.get(confirm_id)
-            if not rec:
-                return jsonify({"status": "unknown"}), 404
-            if rec.get("status") == "pending":
-                rec["status"] = "cursor"
-        return jsonify({"status": "cursor", "confirm_id": confirm_id})
-
-    rec = _set_confirm_decision(confirm_id, decision, kind="local")
+    rec, applied, existing = _set_confirm_decision(
+        confirm_id, decision, kind="local", source=source
+    )
     if not rec:
         return jsonify({"status": "unknown"}), 404
-    return jsonify({"status": decision, "confirm_id": confirm_id})
+    final = decision if applied else existing
+    return jsonify({
+        "status": final,
+        "confirm_id": confirm_id,
+        "applied": applied,
+        "existing": existing,
+    })
 
 
 @app.route("/local-followup/take", methods=["POST"])
@@ -518,18 +515,35 @@ def local_followup_take():
     return jsonify({"text": text, "count": len(items)})
 
 
-def _set_confirm_decision(confirm_id, decision, agent_id="", kind=""):
+def _set_confirm_decision(confirm_id, decision, agent_id="", kind="", source=""):
+    """Apply allow/deny once. First writer wins; later calls are ignored.
+
+    Returns (record, applied, existing_status).
+    """
     rec = None
+    applied = False
+    existing = ""
     with _store_lock:
         rec = pending_confirms.get(confirm_id)
-        if rec:
-            rec["status"] = decision
-            if decision == "allow":
-                conv = rec.get("conversation_id") or agent_id
-                if conv:
-                    # Skip re-prompting Feishu briefly after an allow (retry / double gate).
-                    auto_allow_until[conv] = time.time() + 180
-    if kind == "cloud" or (rec and rec.get("kind") == "cloud"):
+        if not rec:
+            return None, False, ""
+        existing = str(rec.get("status") or "")
+        # Final states are immutable — prevents Feishu + Agent both acting.
+        if existing in ("allow", "deny", "cursor"):
+            return rec, False, existing
+        if decision not in ("allow", "deny", "cursor"):
+            return rec, False, existing
+        rec["status"] = decision
+        rec["decided_by"] = source or kind or "unknown"
+        rec["decided_at"] = time.time()
+        applied = True
+        if decision == "allow":
+            conv = rec.get("conversation_id") or agent_id
+            if conv:
+                # Skip re-prompting Feishu briefly after an allow (retry / double gate).
+                auto_allow_until[conv] = time.time() + 180
+
+    if applied and (kind == "cloud" or (rec and rec.get("kind") == "cloud")):
         target_id = agent_id or (rec or {}).get("conversation_id")
 
         def _run_cloud():
@@ -539,7 +553,42 @@ def _set_confirm_decision(confirm_id, decision, agent_id="", kind=""):
                 cursor_stop_agent(target_id)
 
         threading.Thread(target=_run_cloud, daemon=True).start()
-    return rec
+    return rec, applied, existing
+
+
+def _confirm_result_card(confirm_id, decision, applied, existing=""):
+    """Card shown after a confirm click (including duplicate clicks)."""
+    if not applied and existing in ("allow", "deny", "cursor"):
+        by = {
+            "allow": "已确认（先到先生效，无需再点）",
+            "deny": "已拒绝（先到先生效，无需再点）",
+            "cursor": "已在 Cursor Agent 窗口处理，无需再点飞书",
+        }.get(existing, "已处理，无需重复操作")
+        color = "green" if existing == "allow" else ("red" if existing == "deny" else "blue")
+        title = by
+    elif decision == "allow":
+        title, color = "已确认，Agent 将继续", "green"
+    elif decision == "deny":
+        title, color = "已拒绝", "red"
+    else:
+        title, color = "已交给 Cursor Agent 窗口", "blue"
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "header": {"title": {"tag": "plain_text", "content": title}, "template": color},
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": "两端只需操作一次：先点的生效，另一端再点无效。",
+                },
+            },
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": f"confirm_id={confirm_id}"},
+            },
+        ],
+    }
 
 
 def _find_chat_id_by_name(name):
@@ -578,13 +627,17 @@ def _handle_feishu_card_action(body):
     agent_id = str(value.get("id") or "")
     if act in ("confirm", "deny") and confirm_id:
         decision = "allow" if act == "confirm" else "deny"
-        _set_confirm_decision(confirm_id, decision, agent_id=agent_id, kind=kind)
-        label = "已确认，Agent 将继续" if decision == "allow" else "已拒绝"
-        return {
-            "config": {"wide_screen_mode": True},
-            "header": {"title": {"tag": "plain_text", "content": label}, "template": "green" if decision == "allow" else "red"},
-            "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": f"confirm_id={confirm_id}"}}],
-        }
+        _rec, applied, existing = _set_confirm_decision(
+            confirm_id, decision, agent_id=agent_id, kind=kind, source="feishu"
+        )
+        card = _confirm_result_card(confirm_id, decision, applied, existing)
+        # New card callback format may wrap toast + card; keep plain card for compatibility.
+        if not applied and existing:
+            return {
+                "toast": {"type": "info", "content": "已处理，无需重复操作"},
+                "card": card,
+            }
+        return card
     return {"code": 0}
 
 
@@ -680,7 +733,7 @@ def feishu_callback():
     event_type = body.get("header", {}).get("event_type") or body.get("event", {}).get("type") or ""
     if event_type == "card.action.trigger" or body.get("action"):
         updated = _handle_feishu_card_action(body.get("event") or body)
-        if isinstance(updated, dict) and updated.get("header"):
+        if isinstance(updated, dict) and (updated.get("header") or updated.get("card") or updated.get("toast")):
             return jsonify(updated)
         return jsonify({"code": 0})
     if event_type in ("im.message.receive_v1", "message"):
@@ -689,7 +742,7 @@ def feishu_callback():
     # Older card callback uses top-level action without event_type
     if "action" in body:
         updated = _handle_feishu_card_action(body)
-        if isinstance(updated, dict) and updated.get("header"):
+        if isinstance(updated, dict) and (updated.get("header") or updated.get("card") or updated.get("toast")):
             return jsonify(updated)
     return jsonify({"code": 0})
 
