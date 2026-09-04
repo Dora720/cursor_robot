@@ -2,7 +2,7 @@
 
 Cursor Agent 完成后或需要确认时，通过飞书应用机器人往指定群发卡片。卡片含 Chat 名称；可在飞书点「确认 / 拒绝」，也可回复卡片或 `@机器人 发送 <Chat名> 内容` 把消息发回对应 Chat。
 
-- 作者示例服务：https://cursor-robot.onrender.com（其他人需换成自己的）
+- 作者示例服务：https://cursor-robot.onrender.com（用户需换成自己的）
 - 仓库：https://github.com/Dora720/cursor_robot
 
 ## 它做什么
@@ -14,11 +14,11 @@ Cursor Agent 完成后或需要确认时，通过飞书应用机器人往指定�
 
 不要把 `.env`、`notify.env` 提交到 GitHub。
 
-## 其他人拿到代码要做什么
+## 用户拿到代码要做什么
 
-**不能直接用仓库作者已部署好的 Render 或飞书应用。** 代码可以共用，账号、密钥、群、服务地址必须各自准备一套（除非对方把 Render 权限、飞书应用和密钥都分享给你）。
+**用户不能直接用仓库作者已部署好的 Render 或飞书应用。** 代码可以共用，账号、密钥、群、服务地址必须各自准备一套（除非对方把 Render 权限、飞书应用和密钥都分享给你）。
 
-拿到本仓库后，请按下面顺序自建：
+用户拿到本仓库后，请按下面顺序自建：
 
 1. **自己部署后端**（推荐 Render Free，或其他能跑 Python 的主机）  
    - 用本仓库创建 Web Service，Start Command：`python -u cursor_bot_server.py`  
@@ -51,7 +51,7 @@ Cursor Agent 完成后或需要确认时，通过飞书应用机器人往指定�
 
 验证：打开 `https://你的服务.onrender.com/health` 应返回 `"status": "ok"`；`/test` 会往你的群发一条测试卡片。
 
-上面 README 里出现的 `https://cursor-robot.onrender.com` 只是作者当前示例部署，**其他人请全部换成自己的地址**。
+上面 README 里出现的 `https://cursor-robot.onrender.com` 只是作者当前示例部署，**用户请全部换成自己的地址**。
 
 ## 部署 Render 服务
 
@@ -85,7 +85,7 @@ NOTIFY_URL=https://你的服务.onrender.com/local-notify
 NOTIFY_TOKEN=<与你的 Render CURSOR_WEBHOOK_SECRET 相同>
 ```
 
-（若你加入的是作者已分享密钥的同一套服务，才可使用作者的示例域名；默认请填自己的。）
+（若用户加入的是作者已分享密钥的同一套服务，才可使用作者的示例域名；默认请填自己的。）
 3. 双击 `install.cmd`。
 4. 确认窗口里的 `computer` 是这台电脑的名字，且 `test result` 含 `"status":"sent"`。群里应出现测试卡片。
 5. **完全退出** Cursor（托盘图标也退出）再打开。

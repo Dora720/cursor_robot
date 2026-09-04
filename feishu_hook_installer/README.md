@@ -11,7 +11,7 @@
    NOTIFY_TOKEN=<与 Render 的 CURSOR_WEBHOOK_SECRET 相同>
    ```
 
-   `NOTIFY_URL` / `NOTIFY_TOKEN` 必须指向**你自己部署**的服务与密钥（不能默认共用别人的，除非对方已分享）。
+   `NOTIFY_URL` / `NOTIFY_TOKEN` 必须指向**用户自己部署**的服务与密钥（不能默认共用他人的，除非对方已分享）。
 
 2. 双击 `install.cmd`。
 
