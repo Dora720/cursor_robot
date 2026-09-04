@@ -98,7 +98,19 @@ if (-not $id) { $id = "local-agent" }
 
 $chatName = [string]$data.conversation_title
 if (-not $chatName) { $chatName = [string]$data.title }
+if (-not $chatName) {
+    $py = Join-Path $hookDir "resolve-chat-name.py"
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+    if ($python -and (Test-Path -LiteralPath $py)) {
+        try {
+            $out = & $python.Source $py $id 2>$null
+            if ($out) { $chatName = ([string]$out).Trim() }
+        } catch {}
+    }
+}
 if (-not $chatName -and $workspace) { $chatName = Split-Path -Path $workspace -Leaf }
+Write-Log ("chat_name={0}" -f $chatName)
 
 # Do not put Chinese literals in this script (Windows PowerShell file encoding).
 $bodyObj = @{

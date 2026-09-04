@@ -9,7 +9,7 @@ $cursorDir = Join-Path $env:USERPROFILE ".cursor"
 $hookDir = Join-Path $cursorDir "hooks"
 New-Item -ItemType Directory -Force -Path $hookDir | Out-Null
 
-foreach ($name in @("notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd", "confirm-feishu.ps1", "confirm-feishu.cmd", "confirm-feishu-watch.ps1")) {
+foreach ($name in @("notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd", "confirm-feishu.ps1", "confirm-feishu.cmd", "confirm-feishu-watch.ps1", "resolve-chat-name.py")) {
     $from = Join-Path $srcDir $name
     if (-not (Test-Path -LiteralPath $from)) {
         throw "Missing $from"

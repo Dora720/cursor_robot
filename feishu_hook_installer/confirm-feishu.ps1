@@ -74,7 +74,19 @@ $workspace = ""
 if ($data.workspace_roots) { $workspace = [string]@($data.workspace_roots)[0] }
 $chatName = [string]$data.conversation_title
 if (-not $chatName) { $chatName = [string]$data.title }
+if (-not $chatName) {
+    $py = Join-Path $hookDir "resolve-chat-name.py"
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+    if ($python -and (Test-Path -LiteralPath $py)) {
+        try {
+            $out = & $python.Source $py $id 2>$null
+            if ($out) { $chatName = ([string]$out).Trim() }
+        } catch {}
+    }
+}
 if (-not $chatName -and $workspace) { $chatName = Split-Path -Path $workspace -Leaf }
+Write-Log ("confirm chat_name={0}" -f $chatName)
 $detail = [string]$data.command
 if (-not $detail) { $detail = [string]$data.tool_name }
 if (-not $detail) { $detail = "tool" }
