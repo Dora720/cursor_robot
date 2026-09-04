@@ -267,7 +267,8 @@ def build_cursor_card(payload, status_label=None):
             "content": f"**仓库:** {source.get('repository', 'N/A')}\n**分支:** `{source.get('ref', 'N/A')}`"}},
         {"tag": "div", "text": {"tag": "lark_md",
             "content": (
-                f"确认：点下方按钮，或在电脑弹出的 Allow/Deny 窗口操作（任一处即可）。\n"
+                f"确认：在飞书点下方按钮即可（不必再在 Cursor 确认）。\n"
+                f"若未在飞书确认，可在 Cursor Agent 窗口按提示操作。\n"
                 f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
             )}},
     ]

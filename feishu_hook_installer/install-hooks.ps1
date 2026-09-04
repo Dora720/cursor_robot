@@ -137,6 +137,6 @@ try {
 Write-Host ""
 Write-Host "Next:"
 Write-Host "  1. Cursor Settings -> Agents -> Run Mode: prefer Allowlist or Run Everything"
-Write-Host "     (Auto-review may still ask once; permissions.json reduces that.)"
+Write-Host "     (so Feishu allow is not followed by another Cursor prompt)"
 Write-Host "  2. Fully quit Cursor (tray icon too), reopen, then run one Agent."
-Write-Host "  3. Confirm in Feishu OR in the local Allow/Deny dialog — either is enough."
+Write-Host "  3. Confirm in Feishu; if timed out, use the Agent window only (no OS popup)."
