@@ -630,38 +630,94 @@ def _set_confirm_decision(confirm_id, decision, agent_id="", kind="", source="")
 
 
 def _confirm_result_card(confirm_id, decision, applied, existing=""):
-    """Card shown after a confirm click (including duplicate clicks)."""
+    """Card shown after a confirm click (including duplicate clicks).
+
+    Color scheme vs pending (orange):
+      allow  -> green
+      deny   -> red
+      cursor / already handled -> grey (closed / no longer actionable)
+    """
+    state = existing if (not applied and existing in ("allow", "deny", "cursor")) else decision
     if not applied and existing in ("allow", "deny", "cursor"):
         by = {
-            "allow": "已确认（先到先生效，无需再点）",
-            "deny": "已拒绝（先到先生效，无需再点）",
-            "cursor": "已在 Cursor Agent 窗口处理，无需再点飞书",
+            "allow": "已处理 · 已确认（无需再点）",
+            "deny": "已处理 · 已拒绝（无需再点）",
+            "cursor": "已处理 · 已在 Cursor Agent 窗口处理",
         }.get(existing, "已处理，无需重复操作")
-        color = "green" if existing == "allow" else ("red" if existing == "deny" else "blue")
         title = by
     elif decision == "allow":
-        title, color = "已确认，Agent 将继续", "green"
+        title = "已处理 · 已确认，Agent 将继续"
     elif decision == "deny":
-        title, color = "已拒绝", "red"
+        title = "已处理 · 已拒绝"
     else:
-        title, color = "已交给 Cursor Agent 窗口", "blue"
+        title = "已处理 · 已在 Cursor Agent 窗口处理"
+
+    # Processed cards leave orange (pending) so the group can scan at a glance.
+    if state == "allow":
+        color = "green"
+    elif state == "deny":
+        color = "red"
+    else:
+        color = "grey"
+
+    chat_name = ""
+    detail = ""
+    with _store_lock:
+        rec = pending_confirms.get(confirm_id) or {}
+        conv = rec.get("conversation_id") or ""
+        detail = str(rec.get("detail") or "")
+        if conv and conv in chat_registry:
+            chat_name = str(chat_registry[conv].get("name") or "")
+
+    lines = [
+        "此确认已处理，标题栏颜色已更新（待确认=橙，确认=绿，拒绝=红，窗口处理=灰）。",
+        "两端只需操作一次：先点的生效，另一端再点无效。",
+    ]
+    if chat_name:
+        lines.insert(0, f"Chat：{chat_name}")
+    if detail:
+        lines.append(f"详情：{detail[:200]}")
+    lines.append(f"confirm_id={confirm_id}")
+
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": title}, "template": color},
         "elements": [
             {
                 "tag": "div",
-                "text": {
-                    "tag": "plain_text",
-                    "content": "两端只需操作一次：先点的生效，另一端再点无效。",
-                },
-            },
-            {
-                "tag": "div",
-                "text": {"tag": "plain_text", "content": f"confirm_id={confirm_id}"},
+                "text": {"tag": "plain_text", "content": "\n".join(lines)},
             },
         ],
     }
+
+
+def _public_card(card_content):
+    return {k: v for k, v in (card_content or {}).items() if not str(k).startswith("_")}
+
+
+def _feishu_card_callback_body(card, toast=None, new_format=True):
+    """Build Feishu card-action response (v2 needs type=raw wrapper)."""
+    data = _public_card(card)
+    if new_format:
+        body = {"card": {"type": "raw", "data": data}}
+        if toast:
+            body["toast"] = toast
+        return body
+    if toast:
+        return {"toast": toast, **data}
+    return data
+
+
+def _patch_confirm_card(confirm_id, card):
+    """Best-effort PATCH so the whole group sees the new header color."""
+    with _store_lock:
+        rec = pending_confirms.get(confirm_id) or {}
+        message_id = rec.get("message_id") or ""
+    if message_id:
+        try:
+            patch_card_message(message_id, card)
+        except Exception as exc:
+            print(f"[飞书] patch confirm card failed: {exc}", flush=True)
 
 
 def _find_chat_id_by_name(name):
@@ -686,7 +742,7 @@ def _resolve_chat_by_name(name):
         return last_active_chat.get("id") or ""
 
 
-def _handle_feishu_card_action(body):
+def _handle_feishu_card_action(body, new_format=True):
     action = body.get("action") or {}
     value = action.get("value") or body.get("value") or {}
     if isinstance(value, str):
@@ -704,13 +760,16 @@ def _handle_feishu_card_action(body):
             confirm_id, decision, agent_id=agent_id, kind=kind, source="feishu"
         )
         card = _confirm_result_card(confirm_id, decision, applied, existing)
-        # New card callback format may wrap toast + card; keep plain card for compatibility.
+        # Also PATCH by message_id so color change is visible to the whole group.
+        _patch_confirm_card(confirm_id, card)
+        toast = None
         if not applied and existing:
-            return {
-                "toast": {"type": "info", "content": "已处理，无需重复操作"},
-                "card": card,
-            }
-        return card
+            toast = {"type": "info", "content": "已处理，无需重复操作"}
+        elif applied and decision == "allow":
+            toast = {"type": "success", "content": "已确认"}
+        elif applied and decision == "deny":
+            toast = {"type": "warning", "content": "已拒绝"}
+        return _feishu_card_callback_body(card, toast=toast, new_format=new_format)
     return {"code": 0}
 
 
@@ -804,8 +863,15 @@ def feishu_callback():
         return jsonify({"challenge": body.get("challenge")})
 
     event_type = body.get("header", {}).get("event_type") or body.get("event", {}).get("type") or ""
+    new_card_cb = (
+        event_type == "card.action.trigger"
+        or body.get("schema") == "2.0"
+        or str(body.get("header", {}).get("event_type") or "") == "card.action.trigger"
+    )
     if event_type == "card.action.trigger" or body.get("action"):
-        updated = _handle_feishu_card_action(body.get("event") or body)
+        updated = _handle_feishu_card_action(
+            body.get("event") or body, new_format=new_card_cb
+        )
         if isinstance(updated, dict) and (updated.get("header") or updated.get("card") or updated.get("toast")):
             return jsonify(updated)
         return jsonify({"code": 0})
@@ -814,7 +880,7 @@ def feishu_callback():
         return jsonify({"code": 0})
     # Older card callback uses top-level action without event_type
     if "action" in body:
-        updated = _handle_feishu_card_action(body)
+        updated = _handle_feishu_card_action(body, new_format=False)
         if isinstance(updated, dict) and (updated.get("header") or updated.get("card") or updated.get("toast")):
             return jsonify(updated)
     return jsonify({"code": 0})
