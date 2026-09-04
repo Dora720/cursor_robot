@@ -6,7 +6,7 @@ services:
     region: singapore
     healthCheckPath: /health
     buildCommand: pip install -r requirements.txt
-    startCommand: python cursor_bot_server.py
+    startCommand: python -u cursor_bot_server.py
     envVars:
       - key: FEISHU_APP_ID
         sync: false

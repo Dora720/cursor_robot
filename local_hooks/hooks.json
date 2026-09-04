@@ -3,9 +3,10 @@
   "hooks": {
     "stop": [
       {
-        "command": "./hooks/notify-feishu.cmd",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./hooks/notify-feishu.ps1",
         "timeout": 120
       }
     ]
   }
 }
+

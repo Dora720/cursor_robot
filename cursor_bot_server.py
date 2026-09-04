@@ -198,23 +198,39 @@ def local_notify():
         return jsonify({"status": "ignored", "reason": raw_status}), 200
 
     agent_id = payload.get("id") or payload.get("conversation_id") or "local-agent"
-    summary = payload.get("summary") or payload.get("model") or "本地 Cursor Agent 执行完成"
     workspace = payload.get("workspace") or ""
     if isinstance(payload.get("workspace_roots"), list) and payload["workspace_roots"]:
         workspace = payload["workspace_roots"][0]
+    workspace = str(workspace or "")
+    # Cursor may report Windows paths as /D:/foo
+    if workspace.startswith("/") and len(workspace) > 2 and workspace[2] == ":":
+        workspace = workspace[1:]
     machine = payload.get("machine") or ""
+    model = payload.get("model") or ""
+    # Always compose Chinese on the server. Windows PowerShell hooks often
+    # send GBK-mojibake in the summary field.
+    summary = "本地 Cursor Agent 执行完成"
+    if model:
+        summary = f"本地 Cursor Agent 执行完成 ({model})"
+    if machine:
+        summary = f"{summary}\n**机器:** {machine}"
 
     card_payload = {
         "id": agent_id,
         "status": status,
-        "summary": summary if not machine else f"{summary}\n**机器:** {machine}",
+        "summary": summary,
         "source": {"repository": workspace or "local", "ref": payload.get("ref", "")},
         "target": {"url": payload.get("url", "https://cursor.com")}
     }
-    print(f"[Local] 收到本地 Agent 通知: agent={agent_id}, status={status}")
+    print(f"[Local] 收到本地 Agent 通知: agent={agent_id}, status={status}, machine={machine}", flush=True)
     card = build_cursor_card(card_payload)
-    send_card_to_chat(card)
-    return jsonify({"status": "sent"}), 200
+    result = send_card_to_chat(card)
+    feishu_ok = result.get("code") == 0
+    return jsonify({
+        "status": "sent" if feishu_ok else "feishu_error",
+        "feishu_code": result.get("code"),
+        "feishu_msg": result.get("msg"),
+    }), 200
 
 
 # ====================== 2. Cursor API 轮询（检测需要确认） ======================
