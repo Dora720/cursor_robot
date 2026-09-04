@@ -1,12 +1,17 @@
 {
   "version": 1,
   "hooks": {
+    "sessionStart": [
+      {
+        "command": "cmd.exe /c %USERPROFILE%\\.cursor\\hooks\\ping-hook.cmd",
+        "timeout": 15
+      }
+    ],
     "stop": [
       {
-        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./hooks/notify-feishu.ps1",
+        "command": "cmd.exe /c %USERPROFILE%\\.cursor\\hooks\\notify-feishu.cmd",
         "timeout": 120
       }
     ]
   }
 }
-
