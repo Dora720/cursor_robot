@@ -7,6 +7,7 @@ param(
     [Parameter(Mandatory = $false)][string]$DecideUrl = "",
     [Parameter(Mandatory = $false)][string]$MessageId = "",
     [Parameter(Mandatory = $false)][string]$LogPath = "",
+    [Parameter(Mandatory = $false)][string]$ConversationId = "",
     [Parameter(Mandatory = $false)][int]$TimeoutSec = 120
 )
 
@@ -81,6 +82,71 @@ $script:DenyNames = @(
     "Skip", "Deny", "Reject", "Cancel", "Block"
 )
 $script:AskNames = $script:AlwaysNames + $script:AllowNames + $script:DenyNames
+
+function Arm-LocalAlwaysRun([string]$convId) {
+    if (-not $convId) { return }
+    try {
+        $hookDir = Split-Path -Parent $LogPath
+        if (-not $hookDir) { $hookDir = $PSScriptRoot }
+        $dir = Join-Path $hookDir "always-run"
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        $safe = ($convId -replace "[^\w\-]", "_")
+        [System.IO.File]::WriteAllText((Join-Path $dir $safe), $convId, [System.Text.UTF8Encoding]::new($false))
+        Write-Log ("armed local always-run conv=$convId")
+    } catch {
+        Write-Log ("arm always-run failed: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Test-IsAlwaysName([string]$name) {
+    if (-not $name) { return $false }
+    if (Test-NameMatch $name $script:AlwaysNames $false) { return $true }
+    $t = $name.Trim()
+    return ($t -like "Always Run*" -or $t -like "Always Allow*" -or $t -like "Add to allowlist*")
+}
+
+function Get-AgentApprovalChoice {
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop | Out-Null
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop | Out-Null
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue | Out-Null
+    } catch { return "" }
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    try {
+        $pt = [System.Windows.Forms.Cursor]::Position
+        $el = [System.Windows.Automation.AutomationElement]::FromPoint(
+            (New-Object System.Windows.Point([double]$pt.X, [double]$pt.Y)))
+        $cur = $el
+        for ($i = 0; $i -lt 5 -and $cur; $i++) {
+            try {
+                $n = [string]$cur.Current.Name
+                if ($n) { $candidates.Add($n) }
+            } catch {}
+            try { $cur = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($cur) } catch { break }
+        }
+    } catch {}
+    try {
+        $fe = [System.Windows.Automation.AutomationElement]::FocusedElement
+        if ($fe) {
+            $n = ""
+            try { $n = [string]$fe.Current.Name } catch { $n = "" }
+            if ($n) { $candidates.Add($n) }
+        }
+    } catch {}
+    foreach ($n in $candidates) {
+        if (Test-IsAlwaysName $n) { return "always" }
+    }
+    foreach ($n in $candidates) {
+        if (Test-NameMatch $n $script:DenyNames $false) { return "deny" }
+    }
+    foreach ($n in $candidates) {
+        if ((Test-NameMatch $n $script:AllowNames $false) -and -not (Test-IsAlwaysName $n)) { return "allow" }
+    }
+    return ""
+}
 
 function Get-CursorWindows($root) {
     $list = New-Object System.Collections.Generic.List[object]
@@ -176,13 +242,14 @@ try {
     exit 0
 }
 
-Write-Log ("start confirm_id=$ConfirmId timeout=$TimeoutSec message_id=$MessageId")
+Write-Log ("start confirm_id=$ConfirmId timeout=$TimeoutSec message_id=$MessageId conv=$ConversationId")
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 $seenAsk = $false
 $acted = $false
+$lastChoice = ""
 
 while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Seconds 1
+    Start-Sleep -Milliseconds 250
     $decision = Get-Status
 
     if ($decision -in @("allow", "always", "deny", "cursor")) {
@@ -195,6 +262,7 @@ while ((Get-Date) -lt $deadline) {
             $ok = Invoke-AgentButton $script:AlwaysNames
             if (-not $ok) { $ok = Invoke-AgentButton $script:AllowNames }
             Write-Log ("feishu always -> agent click ok=$ok")
+            Arm-LocalAlwaysRun $ConversationId
         } elseif ($decision -eq "allow") {
             $ok = Invoke-AgentButton $script:AllowNames
             Write-Log ("feishu allow -> agent click ok=$ok")
@@ -210,10 +278,16 @@ while ((Get-Date) -lt $deadline) {
     if ($askVisible) {
         if (-not $seenAsk) { Write-Log "agent ask UI visible" }
         $seenAsk = $true
+        $choice = Get-AgentApprovalChoice
+        if ($choice) { $lastChoice = $choice }
     } elseif ($seenAsk) {
-        # Ask UI was shown then disappeared without Feishu decision => Agent side won.
-        Write-Log "Agent ask UI closed first; mark cursor winner"
-        Send-Decide "cursor" "agent_window"
+        $dec = "cursor"
+        if ($lastChoice -eq "always") { $dec = "always" }
+        elseif ($lastChoice -eq "deny") { $dec = "deny" }
+        elseif ($lastChoice -eq "allow") { $dec = "allow" }
+        Write-Log ("Agent ask UI closed first; mark $dec lastChoice=$lastChoice")
+        Send-Decide $dec "agent_window"
+        if ($dec -eq "always") { Arm-LocalAlwaysRun $ConversationId }
         $acted = $true
         break
     }

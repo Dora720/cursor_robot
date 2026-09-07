@@ -144,6 +144,17 @@ try {
 
 if ($autoAllow) {
     Write-Log "confirm auto_allow from server"
+    try {
+        if ($reqParsed.always -eq $true -or [string]$reqParsed.status -eq "always") {
+            $alwaysDir = Join-Path $hookDir "always-run"
+            if (-not (Test-Path -LiteralPath $alwaysDir)) {
+                New-Item -ItemType Directory -Force -Path $alwaysDir | Out-Null
+            }
+            $alwaysSafe = ($id -replace "[^\w\-]", "_")
+            [System.IO.File]::WriteAllText((Join-Path $alwaysDir $alwaysSafe), $id, [System.Text.UTF8Encoding]::new($false))
+            Write-Log ("armed local always-run from server conv={0}" -f $id)
+        }
+    } catch {}
     Write-Perm "allow"
     exit 0
 }
@@ -163,6 +174,7 @@ if ($confirmId) {
             "-Token", $token,
             "-DecideUrl", $decideUrl,
             "-LogPath", $logPath,
+            "-ConversationId", $id,
             "-TimeoutSec", "120"
         )
         if ($messageId) {
@@ -170,7 +182,7 @@ if ($confirmId) {
         }
         try {
             Start-Process -FilePath "powershell.exe" -ArgumentList $arg -WindowStyle Hidden | Out-Null
-            Write-Log ("started feishu watch confirm_id={0} message_id={1}" -f $confirmId, $messageId)
+            Write-Log ("started feishu watch confirm_id={0} message_id={1} conv={2}" -f $confirmId, $messageId, $id)
         } catch {
             Write-Log ("start watch failed: {0}" -f $_.Exception.Message)
         }

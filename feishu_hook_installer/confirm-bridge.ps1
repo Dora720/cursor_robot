@@ -172,31 +172,55 @@ function Test-AgentAskVisible {
 }
 
 function Get-AgentApprovalChoice {
-    # Best-effort: which approval button currently has focus (Always / Run / Skip).
-    # Used when Agent UI closes first so we can arm Always Run for the rest of the turn.
+    # Prefer element under mouse (user click), then keyboard focus.
     try { Ensure-Uia } catch { return "" }
+    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue | Out-Null } catch {}
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    try {
+        $pt = [System.Windows.Forms.Cursor]::Position
+        $el = [System.Windows.Automation.AutomationElement]::FromPoint(
+            (New-Object System.Windows.Point([double]$pt.X, [double]$pt.Y)))
+        $cur = $el
+        for ($i = 0; $i -lt 5 -and $cur; $i++) {
+            try {
+                $n = [string]$cur.Current.Name
+                if ($n) { $candidates.Add($n) }
+            } catch {}
+            try { $cur = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($cur) } catch { break }
+        }
+    } catch {}
     try {
         $fe = [System.Windows.Automation.AutomationElement]::FocusedElement
         if ($fe) {
             $n = ""
             try { $n = [string]$fe.Current.Name } catch { $n = "" }
-            if (Test-IsAlwaysName $n) { return "always" }
-            if (Test-NameMatch $n $script:DenyNames) { return "deny" }
-            if ((Test-NameMatch $n $script:AllowNames) -and -not (Test-IsAlwaysName $n)) { return "allow" }
+            if ($n) { $candidates.Add($n) }
         }
     } catch {}
     $root = [System.Windows.Automation.AutomationElement]::RootElement
     foreach ($win in (Get-CursorWindows $root)) {
         foreach ($el in (Get-InteractiveElements $win)) {
-            $name = ""
-            try { $name = [string]$el.Current.Name } catch { continue }
             $focused = $false
             try { $focused = [bool]$el.Current.HasKeyboardFocus } catch { $focused = $false }
             if (-not $focused) { continue }
-            if (Test-IsAlwaysName $name) { return "always" }
-            if (Test-NameMatch $name $script:DenyNames) { return "deny" }
-            if ((Test-NameMatch $name $script:AllowNames) -and -not (Test-IsAlwaysName $name)) { return "allow" }
+            try {
+                $n = [string]$el.Current.Name
+                if ($n) { $candidates.Add($n) }
+            } catch {}
         }
+    }
+    foreach ($n in $candidates) {
+        if (Test-IsAlwaysName $n) { return "always" }
+        if ($n.Trim() -like "Always Run*" -or $n.Trim() -like "Always Allow*" -or $n.Trim() -like "Add to allowlist*") {
+            return "always"
+        }
+    }
+    foreach ($n in $candidates) {
+        if (Test-NameMatch $n $script:DenyNames) { return "deny" }
+    }
+    foreach ($n in $candidates) {
+        if ((Test-NameMatch $n $script:AllowNames) -and -not (Test-IsAlwaysName $n)) { return "allow" }
     }
     return ""
 }
@@ -424,5 +448,10 @@ while ($true) {
     } catch {
         Write-Log ("loop err: {0}" -f $_.Exception.Message)
     }
-    Start-Sleep -Seconds 1
+    # Poll faster while an ask UI is up so mouse-over Always Run is not missed.
+    $fast = $false
+    foreach ($k in @($state.Keys)) {
+        if ($state[$k].seenAsk -and -not $state[$k].acted) { $fast = $true; break }
+    }
+    if ($fast) { Start-Sleep -Milliseconds 200 } else { Start-Sleep -Seconds 1 }
 }
