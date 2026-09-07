@@ -660,6 +660,40 @@ def local_confirm_status(confirm_id):
     return jsonify({"status": rec.get("status"), "conversation_id": rec.get("conversation_id")})
 
 
+@app.route("/local-confirm/pending", methods=["GET"])
+def local_confirm_pending():
+    """List recent confirms for the Windows peer bridge (Remote SSH + local).
+
+    Includes pending items and recently decided ones so the local UIA bridge can
+    still click Agent Allow/Deny after Feishu wins.
+    """
+    if not _notify_token_ok(request.headers.get("X-Notify-Token", "")):
+        return jsonify({"error": "unauthorized"}), 403
+    now = time.time()
+    items = []
+    with _store_lock:
+        for cid, rec in list(pending_confirms.items()):
+            status = str(rec.get("status") or "")
+            created = float(rec.get("created") or 0)
+            age = now - created if created else 0
+            if status == "pending" and age <= 180:
+                pass
+            elif status in ("allow", "deny", "cursor") and age <= 180:
+                pass
+            else:
+                continue
+            items.append({
+                "confirm_id": cid,
+                "status": status,
+                "message_id": rec.get("message_id") or "",
+                "conversation_id": rec.get("conversation_id") or "",
+                "created": created,
+                "detail": rec.get("detail") or "",
+            })
+    items.sort(key=lambda x: x.get("created") or 0, reverse=True)
+    return jsonify({"items": items, "count": len(items)})
+
+
 @app.route("/local-confirm/decide", methods=["POST"])
 def local_confirm_decide():
     """Record allow/deny from Feishu, local client, or handoff to Cursor Agent."""

@@ -9,7 +9,12 @@ $cursorDir = Join-Path $env:USERPROFILE ".cursor"
 $hookDir = Join-Path $cursorDir "hooks"
 New-Item -ItemType Directory -Force -Path $hookDir | Out-Null
 
-foreach ($name in @("notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd", "confirm-feishu.ps1", "confirm-feishu.cmd", "confirm-feishu-watch.ps1", "resolve-chat-name.py")) {
+foreach ($name in @(
+    "notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd",
+    "confirm-feishu.ps1", "confirm-feishu.cmd", "confirm-feishu-watch.ps1",
+    "confirm-bridge.ps1", "confirm-bridge.cmd", "start-confirm-bridge.cmd",
+    "resolve-chat-name.py"
+)) {
     $from = Join-Path $srcDir $name
     if (-not (Test-Path -LiteralPath $from)) {
         throw "Missing $from"
@@ -132,3 +137,23 @@ Write-Host "Next:"
 Write-Host "  1. Fully quit Cursor (tray icon too), reopen."
 Write-Host "  2. Confirm is peer: Feishu button OR Cursor Agent window — either works."
 Write-Host "  3. Keep a Run Mode that still shows Agent approval UI when hook returns ask."
+Write-Host "  4. For Remote SSH: keep this Windows install; also install feishu_hook_installer_linux on the remote host."
+Write-Host "     The local confirm-bridge clicks Agent UI when Feishu wins on Remote."
+
+# Start peer bridge now (needed for Remote SSH Feishu <-> Agent UI).
+$startBridge = Join-Path $hookDir "start-confirm-bridge.cmd"
+if (Test-Path -LiteralPath $startBridge) {
+    Start-Process -FilePath $startBridge -WindowStyle Hidden | Out-Null
+    Write-Host "Started confirm-bridge (background)."
+}
+
+# Login startup so Remote SSH peer confirm works even without a local workspace sessionStart.
+try {
+    $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+    $startupCmd = Join-Path $startupDir "cursor-feishu-confirm-bridge.cmd"
+    $bridgeCmd = Join-Path $hookDir "start-confirm-bridge.cmd"
+    "@echo off`r`ncall `"$bridgeCmd`"`r`n" | Set-Content -LiteralPath $startupCmd -Encoding ASCII
+    Write-Host "Startup shortcut : $startupCmd"
+} catch {
+    Write-Host ("WARNING: could not create Startup shortcut: {0}" -f $_.Exception.Message)
+}

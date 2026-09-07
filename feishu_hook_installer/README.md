@@ -28,3 +28,7 @@
 ## 更新后
 
 hook 脚本有更新时，在本机再跑一次 `install.cmd`，并完全退出 Cursor 后重开。
+
+## 卸载
+
+双击 `uninstall.cmd`（或运行 `uninstall-hooks.ps1`），然后完全退出 Cursor 再打开。

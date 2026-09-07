@@ -150,3 +150,18 @@ Cursor 设置里搜索 Hooks，应能看到 `sessionStart`、`stop`、`beforeShe
 - 无系统弹窗；也不用等飞书超时才出现 Agent 确认
 
 已装过的电脑请再跑一次 `install.cmd`，并完全退出 Cursor 后重开。
+
+## Remote Explorer（Linux）安装 hook
+
+用 Cursor **Remote Explorer / Remote SSH** 连 Linux 时，Agent 在远程跑，**只装本机 Windows hook 不够**。请在远程 Linux 上安装 [`feishu_hook_installer_linux/`](feishu_hook_installer_linux/)：
+
+```bash
+cd feishu_hook_installer_linux
+cp notify.env.example notify.env   # 填写与本机相同的 NOTIFY_URL / NOTIFY_TOKEN
+bash install.sh
+```
+
+然后本机完全退出 Cursor，再重连 Remote。详见该目录 [README.md](feishu_hook_installer_linux/README.md)。
+
+说明：远程确认与本机一样是**平级立刻出现**（飞书卡片 + 本机 Agent 窗口），任一方确认即可。  
+Remote 时请同时安装：远程 `feishu_hook_installer_linux` + 本机 Windows `feishu_hook_installer`（本机的 `confirm-bridge` 会在飞书确认时自动点 Agent 窗口）。
