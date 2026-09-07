@@ -89,6 +89,10 @@ def main() -> int:
         return 0
     name = from_state_vscdb(cid) or from_conversation_search(cid)
     if name:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
         # stdout only the name; hooks capture it
         sys.stdout.write(name)
     return 0

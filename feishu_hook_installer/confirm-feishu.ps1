@@ -80,7 +80,10 @@ if (-not $chatName) {
     if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
     if ($python -and (Test-Path -LiteralPath $py)) {
         try {
-            $out = & $python.Source $py $id 2>$null
+            $prevPyEnc = $env:PYTHONIOENCODING
+            $env:PYTHONIOENCODING = "utf-8"
+            $out = & $python.Source -X utf8 $py $id 2>$null
+            if ($prevPyEnc) { $env:PYTHONIOENCODING = $prevPyEnc } else { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue }
             if ($out) { $chatName = ([string]$out).Trim() }
         } catch {}
     }
@@ -108,9 +111,11 @@ Write-Log ("confirm request: {0}" -f $reqOut)
 
 $confirmId = ""
 $autoAllow = $false
+$messageId = ""
 try {
     $reqParsed = $reqOut | ConvertFrom-Json
     $confirmId = [string]$reqParsed.confirm_id
+    $messageId = [string]$reqParsed.message_id
     if ($reqParsed.auto_allow -eq $true -or [string]$reqParsed.status -eq "allow") {
         $autoAllow = $true
     }
@@ -123,7 +128,7 @@ if ($autoAllow) {
 }
 
 # Always open Agent-window confirm immediately (peer with Feishu).
-    if ($confirmId) {
+if ($confirmId) {
     $statusUrl = ($url -replace "/local-notify$", "/local-confirm/status/") + $confirmId
     $decideUrl = $url -replace "/local-notify$", "/local-confirm/decide"
     $watchPs1 = Join-Path $hookDir "confirm-feishu-watch.ps1"
@@ -139,9 +144,12 @@ if ($autoAllow) {
             "-LogPath", $logPath,
             "-TimeoutSec", "120"
         )
+        if ($messageId) {
+            $arg += @("-MessageId", $messageId)
+        }
         try {
             Start-Process -FilePath "powershell.exe" -ArgumentList $arg -WindowStyle Hidden | Out-Null
-            Write-Log ("started feishu watch confirm_id={0}" -f $confirmId)
+            Write-Log ("started feishu watch confirm_id={0} message_id={1}" -f $confirmId, $messageId)
         } catch {
             Write-Log ("start watch failed: {0}" -f $_.Exception.Message)
         }

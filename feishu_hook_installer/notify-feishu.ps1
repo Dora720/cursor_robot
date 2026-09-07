@@ -104,7 +104,10 @@ if (-not $chatName) {
     if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
     if ($python -and (Test-Path -LiteralPath $py)) {
         try {
-            $out = & $python.Source $py $id 2>$null
+            $prevPyEnc = $env:PYTHONIOENCODING
+            $env:PYTHONIOENCODING = "utf-8"
+            $out = & $python.Source -X utf8 $py $id 2>$null
+            if ($prevPyEnc) { $env:PYTHONIOENCODING = $prevPyEnc } else { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue }
             if ($out) { $chatName = ([string]$out).Trim() }
         } catch {}
     }

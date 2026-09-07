@@ -104,6 +104,7 @@ if ($url -and $token) {
 }
 
 # Do NOT add a broad terminalAllowlist here: peer confirm needs Agent ask UI to appear.
+$permPath = Join-Path $cursorDir "permissions.json"
 $perm = @{
     autoRun = @{
         allow_instructions = @()

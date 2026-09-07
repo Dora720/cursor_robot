@@ -36,6 +36,54 @@ def _load_dotenv(path=".env"):
 
 _load_dotenv()
 
+
+def _fix_mojibake(text):
+    """Best-effort repair when UTF-8 bytes were decoded as Latin-1/CP1252."""
+    if not text or not isinstance(text, str):
+        return ""
+    s = text.strip()
+    if not s:
+        return ""
+    # Already looks like normal CJK / ASCII — keep.
+    if any("\u4e00" <= c <= "\u9fff" for c in s) and not any(c in s for c in ("Ã", "Â", "å", "æ", "ä")):
+        return s
+    for enc in ("latin-1", "cp1252"):
+        try:
+            fixed = s.encode(enc).decode("utf-8")
+            if fixed and fixed != s:
+                return fixed.strip()
+        except Exception:
+            pass
+    return s
+
+
+def _text_looks_ok(text):
+    """Reject obvious mojibake / control-junk before putting it on Feishu cards."""
+    if not text or not isinstance(text, str):
+        return False
+    s = text.strip()
+    if not s:
+        return False
+    if "\ufffd" in s:
+        return False
+    # Classic UTF-8-as-Latin-1 mojibake markers
+    bad_markers = ("Ã", "ÂÂ", "æ­", "å·", "ä¸", "æ˜", "ï¿½")
+    if any(m in s for m in bad_markers):
+        return False
+    # Too many non-printable controls
+    controls = sum(1 for c in s if ord(c) < 32 and c not in "\t\n\r")
+    if controls > 0:
+        return False
+    return True
+
+
+def _safe_display_text(text, fallback=""):
+    fixed = _fix_mojibake(text)
+    if _text_looks_ok(fixed):
+        return fixed
+    return fallback or ""
+
+
 # ====================== Config (from environment) ======================
 FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
@@ -134,7 +182,7 @@ def send_card_to_chat(card_content):
         json={
             "receive_id": FEISHU_CHAT_ID,
             "msg_type": "interactive",
-            "content": json.dumps(public_card)
+            "content": json.dumps(public_card, ensure_ascii=False),
         },
         timeout=10
     )
@@ -183,13 +231,36 @@ def patch_card_message(message_id, card_content):
     return result
 
 
-def notify_confirm_resolved(confirm_id, decision, source=""):
+def _confirm_result_card_compact(title, color, detail_lines):
+    """Fallback when collapsible_panel is not accepted by Feishu."""
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": color,
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": (detail_lines[0] if detail_lines else "已处理"),
+                },
+            }
+        ],
+    }
+
+
+def notify_confirm_resolved(confirm_id, decision, source="", message_id=""):
     """After Agent-window (or other) resolve, update Feishu card so the group sees it."""
     with _store_lock:
         rec = pending_confirms.get(confirm_id) or {}
-        message_id = rec.get("message_id") or ""
+        if message_id:
+            rec["message_id"] = message_id
+            if confirm_id in pending_confirms:
+                pending_confirms[confirm_id]["message_id"] = message_id
+        message_id = message_id or rec.get("message_id") or ""
     if not message_id:
-        # Fallback: plain text in group if we lost the card id.
         tip = {
             "allow": "已在 Cursor Agent 窗口确认，可继续。",
             "deny": "已在 Cursor Agent 窗口拒绝。",
@@ -199,11 +270,47 @@ def notify_confirm_resolved(confirm_id, decision, source=""):
             tip = f"{tip}（来源：{source}）"
         send_text_to_chat(tip)
         return
-    card = _confirm_result_card(confirm_id, decision, applied=True, existing="")
-    # For cursor-handled case, prefer the "already in Agent" wording.
     if decision == "cursor" or source in ("agent_window", "cursor"):
         card = _confirm_result_card(confirm_id, decision, applied=False, existing="cursor")
-    patch_card_message(message_id, card)
+    else:
+        card = _confirm_result_card(confirm_id, decision, applied=True, existing="")
+    result = patch_card_message(message_id, card)
+    # Older tenants / clients may reject collapsible_panel — fall back to compact card.
+    if isinstance(result, dict) and result.get("code") not in (0, None) and result.get("code") != 0:
+        title = ((card.get("header") or {}).get("title") or {}).get("content") or "已处理"
+        color = ((card.get("header") or {})).get("template") or "grey"
+        compact = _confirm_result_card_compact(title, color, ["已处理（详情已收起）"])
+        patch_card_message(message_id, compact)
+
+
+def _resolve_pending_for_conversation(conversation_id, source="agent_window", exclude_id=""):
+    """Mark leftover pending confirms as resolved in Agent window and update Feishu cards.
+
+    Used when the next confirm arrives or the Agent turn stops — UIA often cannot
+    see Cursor Auto-review buttons, so the watcher never calls /decide.
+    """
+    if not conversation_id:
+        return []
+    to_notify = []
+    with _store_lock:
+        for cid, rec in list(pending_confirms.items()):
+            if exclude_id and cid == exclude_id:
+                continue
+            if rec.get("conversation_id") != conversation_id:
+                continue
+            if str(rec.get("status") or "") != "pending":
+                continue
+            rec["status"] = "cursor"
+            rec["decided_by"] = source
+            rec["decided_at"] = time.time()
+            to_notify.append(cid)
+    for cid in to_notify:
+        try:
+            notify_confirm_resolved(cid, "cursor", source=source)
+            print(f"[Confirm] auto-resolve {cid} source={source}", flush=True)
+        except Exception as exc:
+            print(f"[Confirm] auto-resolve failed {cid}: {exc}", flush=True)
+    return to_notify
 
 
 def _notify_token_ok(token):
@@ -238,6 +345,7 @@ def _chat_name_from(payload, workspace=""):
         or payload.get("name")
         or ""
     )
+    name = _safe_display_text(name, "")
     if not name and workspace:
         name = os.path.basename(workspace.replace("\\", "/").rstrip("/"))
     return name or ""
@@ -452,6 +560,8 @@ def local_notify():
         "target": {"url": payload.get("url", "https://cursor.com")}
     }
     print(f"[Local] 收到本地 Agent 通知: agent={agent_id}, status={status}, machine={machine}", flush=True)
+    # Agent turn ended — any leftover Feishu confirm cards were handled in the Agent window.
+    _resolve_pending_for_conversation(agent_id, source="agent_window")
     card = build_cursor_card(card_payload)
     result = send_card_to_chat(card)
     feishu_ok = result.get("code") == 0
@@ -473,8 +583,12 @@ def local_confirm_request():
     workspace = _normalize_workspace(payload.get("workspace") or "")
     chat_name = _chat_name_from(payload, workspace)
     machine = payload.get("machine") or ""
-    detail = payload.get("detail") or payload.get("command") or payload.get("tool") or "需要确认的操作"
+    detail_raw = payload.get("detail") or payload.get("command") or payload.get("tool") or ""
+    detail = _safe_display_text(str(detail_raw), "")
     _register_chat(conversation_id, name=chat_name, machine=machine, kind="local", workspace=workspace)
+
+    # Previous pending card for this chat was almost certainly approved in Agent UI.
+    _resolve_pending_for_conversation(conversation_id, source="agent_window")
 
     with _store_lock:
         until = auto_allow_until.get(conversation_id) or 0
@@ -484,7 +598,7 @@ def local_confirm_request():
                 "status": "allow",
                 "conversation_id": conversation_id,
                 "kind": "local",
-                "detail": detail,
+                "detail": detail or "需要确认的操作",
                 "created": time.time(),
             }
             return jsonify({"confirm_id": confirm_id, "status": "allow", "auto_allow": True})
@@ -495,23 +609,42 @@ def local_confirm_request():
             "status": "pending",
             "conversation_id": conversation_id,
             "kind": "local",
-            "detail": detail,
+            "detail": detail or "需要确认的操作",
             "created": time.time(),
             "message_id": "",
         }
+    # Compose Chinese on the server — never trust hook encoding for card copy.
+    summary_lines = ["需要确认的操作"]
+    if machine:
+        summary_lines.insert(0, f"机器: {machine}")
+    if detail:
+        summary_lines.append(detail[:500])
     card = build_cursor_card({
         "id": conversation_id,
         "status": "NEEDS_CONFIRMATION",
         "chat_name": chat_name,
         "confirm_id": confirm_id,
         "kind": "local",
-        "summary": f"{machine + ' / ' if machine else ''}{detail}",
+        "summary": "\n".join(summary_lines),
         "source": {"repository": workspace or "local", "ref": ""},
         "target": {},
     }, status_label="需要确认")
     card["_confirm_id"] = confirm_id
-    send_card_to_chat(card)
-    return jsonify({"confirm_id": confirm_id, "status": "pending", "auto_allow": False})
+    send_result = send_card_to_chat(card)
+    message_id = ""
+    try:
+        message_id = ((send_result or {}).get("data") or {}).get("message_id") or ""
+    except Exception:
+        message_id = ""
+    with _store_lock:
+        if confirm_id in pending_confirms and message_id:
+            pending_confirms[confirm_id]["message_id"] = message_id
+    return jsonify({
+        "confirm_id": confirm_id,
+        "status": "pending",
+        "auto_allow": False,
+        "message_id": message_id,
+    })
 
 
 @app.route("/local-confirm/status/<confirm_id>", methods=["GET"])
@@ -536,6 +669,7 @@ def local_confirm_decide():
     confirm_id = str(payload.get("confirm_id") or "")
     decision = str(payload.get("decision") or "").strip().lower()
     source = str(payload.get("source") or "local")
+    message_id = str(payload.get("message_id") or "")
     if decision in ("allow", "confirm", "yes"):
         decision = "allow"
     elif decision in ("deny", "reject", "no"):
@@ -547,10 +681,33 @@ def local_confirm_decide():
     if not confirm_id:
         return jsonify({"error": "missing confirm_id"}), 400
 
+    if message_id:
+        with _store_lock:
+            if confirm_id in pending_confirms:
+                pending_confirms[confirm_id]["message_id"] = message_id
+
     rec, applied, existing = _set_confirm_decision(
         confirm_id, decision, kind="local", source=source
     )
     if not rec:
+        # Record lost (Render restart) but client still has message_id — patch card anyway.
+        if message_id and decision in ("cursor", "allow", "deny") and source in (
+            "agent_window",
+            "cursor",
+        ):
+            try:
+                notify_confirm_resolved(
+                    confirm_id, decision, source=source, message_id=message_id
+                )
+            except Exception as exc:
+                print(f"[Confirm] feishu notify (orphan) failed: {exc}", flush=True)
+            return jsonify({
+                "status": decision,
+                "confirm_id": confirm_id,
+                "applied": True,
+                "existing": "",
+                "orphan": True,
+            })
         return jsonify({"status": "unknown"}), 404
     final = decision if applied else existing
     # Agent window resolved first -> notify Feishu group by updating the card.
@@ -564,7 +721,9 @@ def local_confirm_decide():
             source == "local" and decision == "cursor"
         ):
             try:
-                notify_confirm_resolved(confirm_id, final, source=source)
+                notify_confirm_resolved(
+                    confirm_id, final, source=source, message_id=message_id
+                )
             except Exception as exc:
                 print(f"[Confirm] feishu notify failed: {exc}", flush=True)
     return jsonify({
@@ -636,23 +795,24 @@ def _confirm_result_card(confirm_id, decision, applied, existing=""):
       allow  -> green
       deny   -> red
       cursor / already handled -> grey (closed / no longer actionable)
+
+    Resolved cards are collapsed: colored header + details in a folded panel.
     """
     state = existing if (not applied and existing in ("allow", "deny", "cursor")) else decision
     if not applied and existing in ("allow", "deny", "cursor"):
         by = {
-            "allow": "已处理 · 已确认（无需再点）",
-            "deny": "已处理 · 已拒绝（无需再点）",
-            "cursor": "已处理 · 已在 Cursor Agent 窗口处理",
+            "allow": "已处理 - 已确认（无需再点）",
+            "deny": "已处理 - 已拒绝（无需再点）",
+            "cursor": "已处理 - 已在 Cursor Agent 窗口处理",
         }.get(existing, "已处理，无需重复操作")
         title = by
     elif decision == "allow":
-        title = "已处理 · 已确认，Agent 将继续"
+        title = "已处理 - 已确认，Agent 将继续"
     elif decision == "deny":
-        title = "已处理 · 已拒绝"
+        title = "已处理 - 已拒绝"
     else:
-        title = "已处理 · 已在 Cursor Agent 窗口处理"
+        title = "已处理 - 已在 Cursor Agent 窗口处理"
 
-    # Processed cards leave orange (pending) so the group can scan at a glance.
     if state == "allow":
         color = "green"
     elif state == "deny":
@@ -665,28 +825,58 @@ def _confirm_result_card(confirm_id, decision, applied, existing=""):
     with _store_lock:
         rec = pending_confirms.get(confirm_id) or {}
         conv = rec.get("conversation_id") or ""
-        detail = str(rec.get("detail") or "")
+        detail = _safe_display_text(str(rec.get("detail") or ""), "")
         if conv and conv in chat_registry:
-            chat_name = str(chat_registry[conv].get("name") or "")
+            chat_name = _safe_display_text(str(chat_registry[conv].get("name") or ""), "")
 
-    lines = [
-        "此确认已处理，标题栏颜色已更新（待确认=橙，确认=绿，拒绝=红，窗口处理=灰）。",
+    detail_lines = [
+        "此确认已处理。",
         "两端只需操作一次：先点的生效，另一端再点无效。",
     ]
     if chat_name:
-        lines.insert(0, f"Chat：{chat_name}")
-    if detail:
-        lines.append(f"详情：{detail[:200]}")
-    lines.append(f"confirm_id={confirm_id}")
+        detail_lines.insert(0, f"Chat: {chat_name}")
+    if detail and detail != "需要确认的操作":
+        detail_lines.append(f"详情: {detail[:200]}")
+    detail_lines.append(f"confirm_id={confirm_id}")
 
+    # Default collapsed so the group timeline stays short after either side resolves.
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
-        "header": {"title": {"tag": "plain_text", "content": title}, "template": color},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": color,
+        },
         "elements": [
             {
-                "tag": "div",
-                "text": {"tag": "plain_text", "content": "\n".join(lines)},
-            },
+                "tag": "collapsible_panel",
+                "expanded": False,
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": "查看详情（已折叠，点击展开）",
+                    },
+                    "vertical_align": "center",
+                    "icon": {
+                        "tag": "standard_icon",
+                        "token": "down-small-ccm_outlined",
+                        "size": "16px 16px",
+                    },
+                    "icon_position": "right",
+                    "icon_expanded_angle": -180,
+                },
+                "border": {"color": "grey", "corner_radius": "5px"},
+                "vertical_spacing": "4px",
+                "padding": "4px 8px 4px 8px",
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "\n".join(detail_lines),
+                        },
+                    }
+                ],
+            }
         ],
     }
 
@@ -709,15 +899,23 @@ def _feishu_card_callback_body(card, toast=None, new_format=True):
 
 
 def _patch_confirm_card(confirm_id, card):
-    """Best-effort PATCH so the whole group sees the new header color."""
+    """Best-effort PATCH so the whole group sees the new header color / folded card."""
     with _store_lock:
         rec = pending_confirms.get(confirm_id) or {}
         message_id = rec.get("message_id") or ""
-    if message_id:
-        try:
-            patch_card_message(message_id, card)
-        except Exception as exc:
-            print(f"[飞书] patch confirm card failed: {exc}", flush=True)
+    if not message_id:
+        return
+    try:
+        result = patch_card_message(message_id, card)
+        if isinstance(result, dict) and result.get("code") not in (0, None) and result.get("code") != 0:
+            title = ((card.get("header") or {}).get("title") or {}).get("content") or "已处理"
+            color = ((card.get("header") or {})).get("template") or "grey"
+            patch_card_message(
+                message_id,
+                _confirm_result_card_compact(title, color, ["已处理（详情已收起）"]),
+            )
+    except Exception as exc:
+        print(f"[飞书] patch confirm card failed: {exc}", flush=True)
 
 
 def _find_chat_id_by_name(name):
