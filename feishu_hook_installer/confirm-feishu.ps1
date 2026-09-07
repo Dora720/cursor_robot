@@ -9,10 +9,19 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 $hookDir = $PSScriptRoot
 if (-not $hookDir) { $hookDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $logPath = Join-Path $hookDir "notify-feishu.log"
+$logRotatePs1 = Join-Path $hookDir "log-rotate.ps1"
+if (Test-Path -LiteralPath $logRotatePs1) {
+    try { . $logRotatePs1 } catch {}
+}
 
 function Write-Log([string]$msg) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
-    try { Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8 } catch {}
+    try {
+        if (Get-Command Rotate-NotifyLog -ErrorAction SilentlyContinue) {
+            Rotate-NotifyLog -LogFile $logPath
+        }
+        Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+    } catch {}
 }
 
 function Read-HookInput {
@@ -90,6 +99,18 @@ if (-not $chatName) {
 }
 if (-not $chatName -and $workspace) { $chatName = Split-Path -Path $workspace -Leaf }
 Write-Log ("confirm chat_name={0}" -f $chatName)
+
+# Our hooks force ask for peer confirm, which overrides Cursor's own Always Run.
+# After Agent/Feishu Always Run, bridge arms a local flag so later confirms allow silently.
+$alwaysDir = Join-Path $hookDir "always-run"
+$alwaysSafe = ($id -replace "[^\w\-]", "_")
+$alwaysFlag = Join-Path $alwaysDir $alwaysSafe
+if ($id -and (Test-Path -LiteralPath $alwaysFlag)) {
+    Write-Log "confirm local always-run armed; permission=allow (skip Feishu)"
+    Write-Perm "allow"
+    exit 0
+}
+
 $detail = [string]$data.command
 if (-not $detail) { $detail = [string]$data.tool_name }
 if (-not $detail) { $detail = "tool" }
@@ -116,7 +137,7 @@ try {
     $reqParsed = $reqOut | ConvertFrom-Json
     $confirmId = [string]$reqParsed.confirm_id
     $messageId = [string]$reqParsed.message_id
-    if ($reqParsed.auto_allow -eq $true -or [string]$reqParsed.status -eq "allow") {
+    if ($reqParsed.auto_allow -eq $true -or [string]$reqParsed.status -eq "allow" -or [string]$reqParsed.status -eq "always") {
         $autoAllow = $true
     }
 } catch {}

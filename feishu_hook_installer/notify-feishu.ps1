@@ -7,10 +7,19 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 $hookDir = $PSScriptRoot
 if (-not $hookDir) { $hookDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $logPath = Join-Path $hookDir "notify-feishu.log"
+$logRotatePs1 = Join-Path $hookDir "log-rotate.ps1"
+if (Test-Path -LiteralPath $logRotatePs1) {
+    try { . $logRotatePs1 } catch {}
+}
 
 function Write-Log([string]$msg) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
-    try { Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8 } catch {}
+    try {
+        if (Get-Command Rotate-NotifyLog -ErrorAction SilentlyContinue) {
+            Rotate-NotifyLog -LogFile $logPath
+        }
+        Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+    } catch {}
 }
 
 function Read-HookInput {
@@ -115,6 +124,17 @@ if (-not $chatName) {
 if (-not $chatName -and $workspace) { $chatName = Split-Path -Path $workspace -Leaf }
 Write-Log ("chat_name={0}" -f $chatName)
 
+# Clear Always Run flag for this conversation when the Agent turn stops.
+try {
+    $alwaysDir = Join-Path $hookDir "always-run"
+    $alwaysSafe = ($id -replace "[^\w\-]", "_")
+    $alwaysFlag = Join-Path $alwaysDir $alwaysSafe
+    if ($id -and (Test-Path -LiteralPath $alwaysFlag)) {
+        Remove-Item -LiteralPath $alwaysFlag -Force -ErrorAction SilentlyContinue
+        Write-Log ("cleared local always-run conv={0}" -f $id)
+    }
+} catch {}
+
 # Do not put Chinese literals in this script (Windows PowerShell file encoding).
 $bodyObj = @{
     event           = "statusChange"
@@ -126,6 +146,11 @@ $bodyObj = @{
     model           = $model
     chat_name       = $chatName
 }
+try { if ($null -ne $data.loop_count) { $bodyObj.loop_count = $data.loop_count } } catch {}
+try { if ($null -ne $data.input_tokens) { $bodyObj.input_tokens = $data.input_tokens } } catch {}
+try { if ($null -ne $data.output_tokens) { $bodyObj.output_tokens = $data.output_tokens } } catch {}
+try { if ($null -ne $data.cache_read_tokens) { $bodyObj.cache_read_tokens = $data.cache_read_tokens } } catch {}
+try { if ($null -ne $data.cache_write_tokens) { $bodyObj.cache_write_tokens = $data.cache_write_tokens } } catch {}
 $json = $bodyObj | ConvertTo-Json -Compress
 Write-Log ("post {0} id={1} status={2}" -f $url, $id, $status)
 

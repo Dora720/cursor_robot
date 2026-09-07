@@ -1,8 +1,8 @@
 # Peer confirm bridge for Windows Cursor UI (local + Remote SSH).
 # Remote Linux hooks return ask and send Feishu cards; this process runs on the
 # Windows machine that shows the Agent window and:
-#   - Feishu allow/deny  -> UIA-click Agent buttons
-#   - Agent UI closed first -> POST decide cursor (update Feishu card)
+#   - Feishu allow/always/deny  -> UIA-click Agent buttons (retry until success)
+#   - Agent Always Run / Run / Skip first -> POST decide + arm local always-run flag
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -12,13 +12,21 @@ if (-not $hookDir) { $hookDir = Split-Path -Parent $MyInvocation.MyCommand.Path 
 $logPath = Join-Path $hookDir "notify-feishu.log"
 $configPath = Join-Path $hookDir "notify.env"
 $lockPath = Join-Path $env:TEMP "cursor-feishu-confirm-bridge.lock"
+$logRotatePs1 = Join-Path $hookDir "log-rotate.ps1"
+if (Test-Path -LiteralPath $logRotatePs1) {
+    try { . $logRotatePs1 } catch {}
+}
 
 function Write-Log([string]$msg) {
     $line = "[{0}] bridge {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
-    try { Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8 } catch {}
+    try {
+        if (Get-Command Rotate-NotifyLog -ErrorAction SilentlyContinue) {
+            Rotate-NotifyLog -LogFile $logPath
+        }
+        Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+    } catch {}
 }
 
-# Single instance
 try {
     $fs = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
     $sw = New-Object System.IO.StreamWriter($fs)
@@ -55,24 +63,54 @@ if (-not $url -or -not $token) {
 
 $pendingUrl = ($url -replace "/local-notify$", "/local-confirm/pending")
 $decideUrl = ($url -replace "/local-notify$", "/local-confirm/decide")
+$alwaysRunDir = Join-Path $hookDir "always-run"
+
+function Arm-LocalAlwaysRun([string]$convId) {
+    if (-not $convId) { return }
+    try {
+        if (-not (Test-Path -LiteralPath $alwaysRunDir)) {
+            New-Item -ItemType Directory -Force -Path $alwaysRunDir | Out-Null
+        }
+        $safe = ($convId -replace "[^\w\-]", "_")
+        [System.IO.File]::WriteAllText((Join-Path $alwaysRunDir $safe), $convId, [System.Text.UTF8Encoding]::new($false))
+        Write-Log ("armed local always-run conv=$convId")
+    } catch {
+        Write-Log ("arm always-run failed: {0}" -f $_.Exception.Message)
+    }
+}
+
+# Cursor Agent order: Skip | Always Run | Run — keep Always separate from once-Run.
+$script:AlwaysNames = @(
+    "Always Run", "Always Allow", "Always approve", "Add to allowlist", "Add to Allowlist"
+)
+$script:AllowNames = @(
+    "Run", "Allow", "Approve", "Accept", "Continue", "Confirm",
+    "Allow once", "Run command", "Run All"
+)
+$script:DenyNames = @(
+    "Skip", "Deny", "Reject", "Cancel", "Block"
+)
+$script:AskNames = $script:AlwaysNames + $script:AllowNames + $script:DenyNames
 
 function Test-NameMatch([string]$name, [string[]]$names) {
     if (-not $name) { return $false }
     $n = $name.Trim()
     foreach ($want in $names) {
         if ($n -eq $want) { return $true }
+        if ($n.StartsWith($want + " ")) { return $true }
     }
     return $false
 }
 
-$script:AllowNames = @(
-    "Run", "Allow", "Approve", "Accept", "Continue", "Confirm",
-    "Allow once", "Run command", "Run everything", "Always Run"
-)
-$script:DenyNames = @(
-    "Deny", "Reject", "Skip", "Cancel", "Block"
-)
-$script:AskNames = $script:AllowNames + $script:DenyNames
+function Test-IsAlwaysName([string]$name) {
+    return (Test-NameMatch $name $script:AlwaysNames)
+}
+
+function Ensure-Uia {
+    Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop | Out-Null
+    Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop | Out-Null
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue | Out-Null
+}
 
 function Get-CursorWindows($root) {
     $list = New-Object System.Collections.Generic.List[object]
@@ -98,52 +136,164 @@ function Get-CursorWindows($root) {
     return $list
 }
 
-function Test-AgentAskVisible {
-    try {
-        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop | Out-Null
-        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop | Out-Null
-    } catch { return $false }
-    $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $btnType = [System.Windows.Automation.ControlType]::Button
-    $condType = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $btnType)
-    foreach ($win in (Get-CursorWindows $root)) {
+function Get-InteractiveElements($win) {
+    $out = New-Object System.Collections.Generic.List[object]
+    $types = @(
+        [System.Windows.Automation.ControlType]::Button,
+        [System.Windows.Automation.ControlType]::Hyperlink,
+        [System.Windows.Automation.ControlType]::MenuItem,
+        [System.Windows.Automation.ControlType]::SplitButton,
+        [System.Windows.Automation.ControlType]::ListItem,
+        [System.Windows.Automation.ControlType]::Custom,
+        [System.Windows.Automation.ControlType]::Text
+    )
+    foreach ($t in $types) {
         try {
-            $buttons = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condType)
-            foreach ($btn in $buttons) {
-                $name = ""
-                try { $name = [string]$btn.Current.Name } catch { continue }
-                if (Test-NameMatch $name $script:AskNames) { return $true }
-            }
+            $cond = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $t)
+            $els = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+            foreach ($el in $els) { $out.Add($el) }
         } catch {}
+    }
+    return $out
+}
+
+function Test-AgentAskVisible {
+    try { Ensure-Uia } catch { return $false }
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    foreach ($win in (Get-CursorWindows $root)) {
+        foreach ($el in (Get-InteractiveElements $win)) {
+            $name = ""
+            try { $name = [string]$el.Current.Name } catch { continue }
+            if (Test-NameMatch $name $script:AskNames) { return $true }
+        }
     }
     return $false
 }
 
-function Invoke-AgentButton([string[]]$names) {
+function Get-AgentApprovalChoice {
+    # Best-effort: which approval button currently has focus (Always / Run / Skip).
+    # Used when Agent UI closes first so we can arm Always Run for the rest of the turn.
+    try { Ensure-Uia } catch { return "" }
     try {
-        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop | Out-Null
-        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop | Out-Null
-    } catch { return $false }
+        $fe = [System.Windows.Automation.AutomationElement]::FocusedElement
+        if ($fe) {
+            $n = ""
+            try { $n = [string]$fe.Current.Name } catch { $n = "" }
+            if (Test-IsAlwaysName $n) { return "always" }
+            if (Test-NameMatch $n $script:DenyNames) { return "deny" }
+            if ((Test-NameMatch $n $script:AllowNames) -and -not (Test-IsAlwaysName $n)) { return "allow" }
+        }
+    } catch {}
     $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $btnType = [System.Windows.Automation.ControlType]::Button
-    $condType = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $btnType)
     foreach ($win in (Get-CursorWindows $root)) {
-        try {
-            $buttons = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condType)
-            foreach ($btn in $buttons) {
-                $name = ""
-                try { $name = [string]$btn.Current.Name } catch { continue }
-                if (-not (Test-NameMatch $name $names)) { continue }
-                try {
-                    $inv = $btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-                    $inv.Invoke()
-                    Write-Log ("clicked button name=$name")
-                    return $true
-                } catch {}
+        foreach ($el in (Get-InteractiveElements $win)) {
+            $name = ""
+            try { $name = [string]$el.Current.Name } catch { continue }
+            $focused = $false
+            try { $focused = [bool]$el.Current.HasKeyboardFocus } catch { $focused = $false }
+            if (-not $focused) { continue }
+            if (Test-IsAlwaysName $name) { return "always" }
+            if (Test-NameMatch $name $script:DenyNames) { return "deny" }
+            if ((Test-NameMatch $name $script:AllowNames) -and -not (Test-IsAlwaysName $name)) { return "allow" }
+        }
+    }
+    return ""
+}
+
+function Try-ClickElement($el, [string]$name) {
+    # 1) InvokePattern
+    try {
+        $inv = $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+        $inv.Invoke()
+        Write-Log ("clicked invoke name=$name")
+        return $true
+    } catch {}
+    # 2) LegacyIAccessible default action
+    try {
+        $accType = [Type]::GetType("System.Windows.Automation.LegacyIAccessiblePattern, UIAutomationClient")
+        if ($accType) {
+            $patField = $accType.GetField("Pattern")
+            $pattern = $el.GetCurrentPattern($patField.GetValue($null))
+            if ($pattern) {
+                $pattern.DoDefaultAction()
+                Write-Log ("clicked legacy name=$name")
+                return $true
             }
-        } catch {}
+        }
+    } catch {}
+    # 3) Mouse click clickable point
+    try {
+        $pt = $el.GetClickablePoint()
+        [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]$pt.X, [int]$pt.Y)
+        Start-Sleep -Milliseconds 40
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class BridgeMouse {
+  [DllImport("user32.dll")] public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
+  public const int LEFTDOWN = 0x0002;
+  public const int LEFTUP = 0x0004;
+  public static void Click() { mouse_event(LEFTDOWN, 0, 0, 0, 0); mouse_event(LEFTUP, 0, 0, 0, 0); }
+}
+"@ -ErrorAction SilentlyContinue
+        [BridgeMouse]::Click()
+        Write-Log ("clicked mouse name=$name x=$([int]$pt.X) y=$([int]$pt.Y)")
+        return $true
+    } catch {
+        Write-Log ("click fail name=$name err=$($_.Exception.Message)")
+    }
+    return $false
+}
+
+function Try-SendKeysAllow {
+    try {
+        Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop | Out-Null
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop | Out-Null
+        $procs = @(Get-Process -Name "Cursor" -ErrorAction SilentlyContinue)
+        foreach ($p in $procs) {
+            try {
+                [Microsoft.VisualBasic.Interaction]::AppActivate($p.Id) | Out-Null
+                Start-Sleep -Milliseconds 80
+                # Common approval shortcuts in review UI
+                [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+                Start-Sleep -Milliseconds 120
+                Write-Log "sent Enter to Cursor"
+                return $true
+            } catch {}
+        }
+    } catch {
+        Write-Log ("SendKeys failed: {0}" -f $_.Exception.Message)
+    }
+    return $false
+}
+
+function Invoke-AgentButton([string[]]$names, [switch]$PreferAlways, [switch]$ExcludeAlways, [switch]$NoSendKeys) {
+    try { Ensure-Uia } catch {
+        Write-Log ("uia load failed: {0}" -f $_.Exception.Message)
+        return $false
+    }
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $found = New-Object System.Collections.Generic.List[string]
+    foreach ($win in (Get-CursorWindows $root)) {
+        foreach ($el in (Get-InteractiveElements $win)) {
+            $name = ""
+            try { $name = [string]$el.Current.Name } catch { continue }
+            if (-not $name) { continue }
+            if ($found.Count -lt 40) { $found.Add($name) }
+            if ($ExcludeAlways -and (Test-IsAlwaysName $name)) { continue }
+            if (-not (Test-NameMatch $name $names)) { continue }
+            if (Try-ClickElement $el $name) { return $true }
+        }
+    }
+    if ($found.Count -gt 0) {
+        Write-Log ("no clickable match; sample names: " + (($found | Select-Object -Unique | Select-Object -First 25) -join " | "))
+    } else {
+        Write-Log "no interactive elements found in Cursor windows"
+    }
+    # Enter usually activates primary Run — only use for once-allow, not Always/Deny.
+    if (-not $NoSendKeys -and -not $PreferAlways) {
+        if (Try-SendKeysAllow) { return $true }
     }
     return $false
 }
@@ -182,12 +332,14 @@ while ($true) {
         }
         $items = Get-PendingItems
         $alive = @{}
+        # Prefer newest first so the active ask UI is handled before stale allows.
+        $items = @($items | Sort-Object { $_.created } -Descending)
         foreach ($it in $items) {
             $cid = [string]$it.confirm_id
             if (-not $cid) { continue }
             $alive[$cid] = $true
             if (-not $state.ContainsKey($cid)) {
-                $state[$cid] = @{ seenAsk = $false; acted = $false }
+                $state[$cid] = @{ seenAsk = $false; acted = $false; failCount = 0; lastChoice = "" }
             }
             $st = $state[$cid]
             if ($st.acted) { continue }
@@ -195,16 +347,50 @@ while ($true) {
             $status = [string]$it.status
             $msgId = [string]$it.message_id
 
+            if ($status -eq "always") {
+                $ok = Invoke-AgentButton $script:AlwaysNames -PreferAlways -NoSendKeys
+                if ($ok) {
+                    Write-Log ("feishu always -> click ok id=$cid")
+                    Arm-LocalAlwaysRun ([string]$it.conversation_id)
+                    $st.acted = $true
+                } else {
+                    # Fallback: once-Run still unblocks Agent; server already auto-allows later.
+                    $ok2 = Invoke-AgentButton $script:AllowNames -ExcludeAlways
+                    if ($ok2) {
+                        Write-Log ("feishu always -> fallback Run click ok id=$cid")
+                        Arm-LocalAlwaysRun ([string]$it.conversation_id)
+                        $st.acted = $true
+                    } else {
+                        $st.failCount++
+                        Write-Log ("feishu always -> click fail id=$cid n=$($st.failCount)")
+                        if ($st.failCount -ge 45) { $st.acted = $true }
+                    }
+                }
+                continue
+            }
             if ($status -eq "allow") {
-                $ok = Invoke-AgentButton $script:AllowNames
-                Write-Log ("feishu allow -> click ok=$ok id=$cid")
-                $st.acted = $true
+                $ok = Invoke-AgentButton $script:AllowNames -ExcludeAlways
+                if ($ok) {
+                    Write-Log ("feishu allow -> click ok id=$cid")
+                    $st.acted = $true
+                } else {
+                    $st.failCount++
+                    Write-Log ("feishu allow -> click fail id=$cid n=$($st.failCount)")
+                    # Keep retrying while ask UI likely still open.
+                    if ($st.failCount -ge 45) { $st.acted = $true }
+                }
                 continue
             }
             if ($status -eq "deny") {
-                $ok = Invoke-AgentButton $script:DenyNames
-                Write-Log ("feishu deny -> click ok=$ok id=$cid")
-                $st.acted = $true
+                $ok = Invoke-AgentButton $script:DenyNames -NoSendKeys
+                if ($ok) {
+                    Write-Log ("feishu deny -> click ok id=$cid")
+                    $st.acted = $true
+                } else {
+                    $st.failCount++
+                    Write-Log ("feishu deny -> click fail id=$cid n=$($st.failCount)")
+                    if ($st.failCount -ge 45) { $st.acted = $true }
+                }
                 continue
             }
             if ($status -eq "cursor") {
@@ -216,9 +402,19 @@ while ($true) {
             if ($ask) {
                 if (-not $st.seenAsk) { Write-Log ("ask UI visible id=$cid") }
                 $st.seenAsk = $true
+                $choice = Get-AgentApprovalChoice
+                if ($choice) { $st.lastChoice = $choice }
             } elseif ($st.seenAsk) {
-                Write-Log ("ask UI closed first; mark cursor id=$cid")
-                Send-Decide $cid "cursor" "agent_window" $msgId
+                # Agent window decided first. If user picked Always Run, arm session silent-allow.
+                $dec = "cursor"
+                if ($st.lastChoice -eq "always") { $dec = "always" }
+                elseif ($st.lastChoice -eq "deny") { $dec = "deny" }
+                elseif ($st.lastChoice -eq "allow") { $dec = "allow" }
+                Write-Log ("ask UI closed first; mark $dec id=$cid lastChoice=$($st.lastChoice)")
+                Send-Decide $cid $dec "agent_window" $msgId
+                if ($dec -eq "always") {
+                    Arm-LocalAlwaysRun ([string]$it.conversation_id)
+                }
                 $st.acted = $true
             }
         }

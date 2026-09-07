@@ -109,8 +109,10 @@ pending_confirms = {}       # confirm_id -> record
 pending_followups = {}      # conversation_id -> [text, ...]
 feishu_msg_to_chat = {}     # feishu message_id -> conversation_id
 last_active_chat = {"id": ""}
-# conversation_id -> unix expiry; recent Feishu allow skips another card
-auto_allow_until = {}
+# Always Run is session-scoped: armed until this chat's Agent turn stops.
+always_run_chats = set()
+# conversation_id / agent_id -> last known detail snapshot for Feishu "Agent 详情"
+agent_details = {}
 
 
 # ====================== 飞书 API 封装 ======================
@@ -262,10 +264,12 @@ def notify_confirm_resolved(confirm_id, decision, source="", message_id=""):
         message_id = message_id or rec.get("message_id") or ""
     if not message_id:
         tip = {
-            "allow": "已在 Cursor Agent 窗口确认，可继续。",
-            "deny": "已在 Cursor Agent 窗口拒绝。",
+            "allow": "已在 Cursor Agent 窗口确认（运行），可继续。",
+            "always": "已在 Cursor Agent 窗口 Always Run，可继续。",
+            "deny": "已在 Cursor Agent 窗口跳过/拒绝。",
             "cursor": "已在 Cursor Agent 窗口处理，无需再点飞书。",
         }.get(decision, "确认状态已更新。")
+
         if source:
             tip = f"{tip}（来源：{source}）"
         send_text_to_chat(tip)
@@ -283,14 +287,79 @@ def notify_confirm_resolved(confirm_id, decision, source="", message_id=""):
         patch_card_message(message_id, compact)
 
 
-def _resolve_pending_for_conversation(conversation_id, source="agent_window", exclude_id=""):
+def _arm_auto_allow(conversation_id, mode="always", ttl_sec=None):
+    """Arm Always Run silent skip for a conversation until Agent stop.
+
+    Single Run does not arm anything — twins are handled by pending reuse only.
+    """
+    if not conversation_id:
+        return
+    if mode != "always":
+        return
+    with _store_lock:
+        always_run_chats.add(conversation_id)
+
+
+def _clear_always_run(conversation_id):
+    """Clear Always Run when Agent turn ends or user skips/denies."""
+    if not conversation_id:
+        return
+    with _store_lock:
+        always_run_chats.discard(conversation_id)
+
+
+def _auto_allow_state(conversation_id):
+    """Return (active: bool, mode: str). Only Always Run is silent; single Run is not."""
+    if not conversation_id:
+        return False, ""
+    with _store_lock:
+        if conversation_id in always_run_chats:
+            return True, "always"
+    return False, ""
+
+
+def _fold_sibling_pendings(conversation_id, decision, exclude_id="", source="feishu"):
+    """Mark other pending confirms in the same chat as decided (update existing cards only)."""
+    if not conversation_id or decision not in ("allow", "always", "deny", "cursor"):
+        return []
+    now = time.time()
+    siblings = []
+    with _store_lock:
+        for cid, rec in list(pending_confirms.items()):
+            if exclude_id and cid == exclude_id:
+                continue
+            if rec.get("conversation_id") != conversation_id:
+                continue
+            if str(rec.get("status") or "") != "pending":
+                continue
+            rec["status"] = decision
+            rec["decided_by"] = source
+            rec["decided_at"] = now
+            siblings.append(cid)
+    for cid in siblings:
+        try:
+            notify_confirm_resolved(cid, decision, source=source)
+            print(f"[Confirm] fold sibling {cid} -> {decision}", flush=True)
+        except Exception as exc:
+            print(f"[Confirm] fold sibling failed {cid}: {exc}", flush=True)
+    return siblings
+
+
+def _resolve_pending_for_conversation(
+    conversation_id, source="agent_window", exclude_id="", min_age_sec=0, notify=True
+):
     """Mark leftover pending confirms as resolved in Agent window and update Feishu cards.
 
     Used when the next confirm arrives or the Agent turn stops — UIA often cannot
     see Cursor Auto-review buttons, so the watcher never calls /decide.
+
+    min_age_sec: only resolve pendings older than this (avoids killing a twin hook
+    that fired 1s earlier for the same shell/tool on Remote SSH).
+    notify: when False, only update memory (no Feishu patch/text) — used under Always Run.
     """
     if not conversation_id:
         return []
+    now = time.time()
     to_notify = []
     with _store_lock:
         for cid, rec in list(pending_confirms.items()):
@@ -300,10 +369,15 @@ def _resolve_pending_for_conversation(conversation_id, source="agent_window", ex
                 continue
             if str(rec.get("status") or "") != "pending":
                 continue
+            created = float(rec.get("created") or 0)
+            if min_age_sec and created and (now - created) < min_age_sec:
+                continue
             rec["status"] = "cursor"
             rec["decided_by"] = source
-            rec["decided_at"] = time.time()
+            rec["decided_at"] = now
             to_notify.append(cid)
+    if not notify:
+        return to_notify
     for cid in to_notify:
         try:
             notify_confirm_resolved(cid, "cursor", source=source)
@@ -401,16 +475,210 @@ def enqueue_followup(conversation_id, text, kind="local"):
     return True
 
 
+def _remember_agent_detail(agent_id, **fields):
+    """Keep a snapshot so Feishu 'Agent 详情' can expand without opening cursor.com."""
+    if not agent_id:
+        return
+    with _store_lock:
+        prev = agent_details.get(agent_id) or {}
+        merged = dict(prev)
+        for key, value in fields.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                merged[key] = text
+        merged["updated_at"] = time.time()
+        agent_details[agent_id] = merged
+
+
+def _is_useful_agent_url(url):
+    """True only for a real Cloud Agent / PR deep link — never marketing homepage."""
+    u = (url or "").strip().lower().rstrip("/")
+    if not u:
+        return False
+    # Bare site / www — never treat as Agent detail link
+    if u in (
+        "https://cursor.com",
+        "http://cursor.com",
+        "https://www.cursor.com",
+        "http://www.cursor.com",
+        "https://cursor.com/home",
+        "https://www.cursor.com/home",
+    ):
+        return False
+    if "cursor.com/agents" in u:
+        return True
+    if "github.com/" in u or "gitlab.com/" in u:
+        return True
+    return False
+
+
+def _status_label_zh(status):
+    return {
+        "FINISHED": "已完成",
+        "COMPLETED": "已完成",
+        "ERROR": "出错",
+        "FAILED": "失败",
+        "RUNNING": "运行中",
+        "NEEDS_CONFIRMATION": "待确认",
+    }.get(str(status or "").upper(), str(status or "未知"))
+
+
+def _agent_detail_lines(agent_id, payload=None):
+    """Build markdown lines for Agent run status (shown inside Feishu card)."""
+    payload = payload or {}
+    with _store_lock:
+        snap = dict(agent_details.get(agent_id) or {})
+        reg = dict(chat_registry.get(agent_id) or {})
+    chat_name = (
+        payload.get("chat_name")
+        or snap.get("chat_name")
+        or reg.get("name")
+        or ""
+    )
+    kind = payload.get("kind") or snap.get("kind") or reg.get("kind") or ""
+    machine = payload.get("machine") or snap.get("machine") or reg.get("machine") or ""
+    model = payload.get("model") or snap.get("model") or ""
+    workspace = (
+        payload.get("workspace")
+        or (payload.get("source") or {}).get("repository")
+        or snap.get("workspace")
+        or reg.get("workspace")
+        or ""
+    )
+    status = payload.get("status") or snap.get("status") or ""
+    summary = payload.get("summary") or snap.get("summary") or ""
+    branch = (payload.get("source") or {}).get("ref") or snap.get("ref") or ""
+    url = (payload.get("target") or {}).get("url") or snap.get("url") or ""
+
+    kind_zh = {"local": "本地 Agent", "cloud": "Cloud Agent"}.get(str(kind), kind or "未知")
+
+    lines = ["**运行情况**"]
+    lines.append(f"**结果:** {_status_label_zh(status)}")
+    if chat_name:
+        lines.append(f"**Chat:** {chat_name}")
+    lines.append(f"**会话 ID:** `{agent_id or '未知'}`")
+    lines.append(f"**类型:** {kind_zh}")
+    if machine:
+        lines.append(f"**机器:** {machine}")
+    if model:
+        lines.append(f"**模型:** `{model}`")
+    if workspace:
+        lines.append(f"**工作区:** `{workspace}`")
+    if branch:
+        lines.append(f"**分支:** `{branch}`")
+
+    # Token / loop metrics from stop hook when available
+    def _num(key):
+        for src in (payload, snap):
+            v = src.get(key)
+            if v is None or v == "":
+                continue
+            try:
+                return int(float(v))
+            except Exception:
+                return str(v)
+        return None
+
+    loop_count = _num("loop_count")
+    in_tok = _num("input_tokens")
+    out_tok = _num("output_tokens")
+    cache_r = _num("cache_read_tokens")
+    cache_w = _num("cache_write_tokens")
+    metric_parts = []
+    if loop_count is not None:
+        metric_parts.append(f"loop={loop_count}")
+    if in_tok is not None:
+        metric_parts.append(f"input={in_tok}")
+    if out_tok is not None:
+        metric_parts.append(f"output={out_tok}")
+    if cache_r is not None:
+        metric_parts.append(f"cache_read={cache_r}")
+    if cache_w is not None:
+        metric_parts.append(f"cache_write={cache_w}")
+    if metric_parts:
+        lines.append(f"**用量:** {' · '.join(metric_parts)}")
+
+    if summary:
+        # Keep summary readable; strip markdown bold noise from server-composed lines
+        clean = str(summary).replace("**", "").strip()
+        lines.append(f"**摘要:** {clean[:800]}")
+    if _is_useful_agent_url(url):
+        lines.append(f"**Cloud 链接:** {url}")
+    updated = snap.get("updated_at")
+    if updated:
+        try:
+            lines.append(
+                f"**更新时间:** {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(updated)))}"
+            )
+        except Exception:
+            pass
+    return lines
+
+
+def _build_agent_detail_card(agent_id, base_payload=None):
+    """Card returned when user taps 运行情况 / Agent 详情 on Feishu."""
+    base_payload = dict(base_payload or {})
+    base_payload.setdefault("id", agent_id)
+    with _store_lock:
+        snap = dict(agent_details.get(agent_id) or {})
+    status = base_payload.get("status") or snap.get("status") or "FINISHED"
+    status_map = {
+        "FINISHED": ("📋 运行情况", "blue"),
+        "ERROR": ("📋 运行情况（出错）", "red"),
+        "NEEDS_CONFIRMATION": ("📋 运行情况（待确认）", "orange"),
+        "RUNNING": ("📋 运行情况（运行中）", "blue"),
+    }
+    title, color = status_map.get(status, ("📋 运行情况", "blue"))
+    lines = _agent_detail_lines(agent_id, {**snap, **base_payload, "status": status})
+    elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "返回摘要"},
+                    "type": "default",
+                    "value": {
+                        "action": "agent_summary",
+                        "id": agent_id,
+                        "kind": base_payload.get("kind") or snap.get("kind") or "",
+                    },
+                }
+            ],
+        },
+    ]
+    # Never attach cursor.com. Only real Cloud Agent / PR deep links as a separate button.
+    url = (base_payload.get("target") or {}).get("url") or snap.get("url") or ""
+    if _is_useful_agent_url(url):
+        elements[1]["actions"].insert(0, {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "打开 Cloud Agent"},
+            "url": url,
+            "type": "default",
+        })
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "header": {"title": {"tag": "plain_text", "content": title}, "template": color},
+        "elements": elements,
+        "_conversation_id": agent_id,
+    }
+
+
 def build_cursor_card(payload, status_label=None):
     """构建飞书交互卡片"""
     status = payload.get("status", "UNKNOWN")
     summary = payload.get("summary", "无摘要")
     agent_id = payload.get("id", "未知")
-    target = payload.get("target", {})
-    source = payload.get("source", {})
+    target = payload.get("target", {}) or {}
+    source = payload.get("source", {}) or {}
     chat_name = payload.get("chat_name") or payload.get("name") or ""
     confirm_id = payload.get("confirm_id") or ""
     kind = payload.get("kind") or ""
+    machine = payload.get("machine") or ""
+    model = payload.get("model") or ""
 
     status_map = {
         "FINISHED": ("✅ Cursor Agent 执行完成", "green"),
@@ -426,42 +694,83 @@ def build_cursor_card(payload, status_label=None):
     ]
     if chat_name:
         info_lines.append(f"**Chat:** {chat_name}")
+    if kind:
+        info_lines.append(f"**类型:** `{kind}`")
+    if machine:
+        info_lines.append(f"**机器:** {machine}")
+    if model:
+        info_lines.append(f"**模型:** `{model}`")
     info_lines.append(f"**摘要:** {summary}")
 
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(info_lines)}},
         {"tag": "div", "text": {"tag": "lark_md",
-            "content": f"**仓库:** {source.get('repository', 'N/A')}\n**分支:** `{source.get('ref', 'N/A')}`"}},
-        {"tag": "div", "text": {"tag": "lark_md",
-            "content": (
-                f"确认方式（平级二选一）：飞书按钮 或 Cursor Agent 窗口，**先点的生效**，另一端再点无效。\n"
-                f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
-            )}},
+            "content": f"**仓库/工作区:** {source.get('repository', 'N/A')}\n**分支:** `{source.get('ref', 'N/A') or 'N/A'}`"}},
     ]
+
+    if confirm_id or status == "NEEDS_CONFIRMATION":
+        elements.append({"tag": "div", "text": {"tag": "lark_md",
+            "content": (
+                f"确认方式（与 Cursor Agent 同序）：**跳过 / Always Run / 运行**；飞书或 Agent 窗口先点的生效。\n"
+                f"Always Run：点 Agent 的 Always Run，本回合内后续确认不再发飞书（回合结束即取消）。\n"
+                f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
+            )}})
+    else:
+        elements.append({"tag": "div", "text": {"tag": "lark_md",
+            "content": (
+                f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`\n"
+                f"点击 **运行情况** 可在卡片内查看本次 Agent 运行详情（不会打开 Cursor 官网）。"
+            )}})
 
     actions = []
     if confirm_id:
+        # Match Cursor Agent approval order: Skip | Always Run | Run
         actions.append({
             "tag": "button",
-            "text": {"tag": "plain_text", "content": "确认"},
-            "type": "primary",
-            "value": {"action": "confirm", "confirm_id": confirm_id, "kind": kind or "local", "id": agent_id},
+            "text": {"tag": "plain_text", "content": "跳过"},
+            "type": "default",
+            "value": {"action": "deny", "confirm_id": confirm_id, "kind": kind or "local", "id": agent_id},
         })
         actions.append({
             "tag": "button",
-            "text": {"tag": "plain_text", "content": "拒绝"},
+            "text": {"tag": "plain_text", "content": "Always Run"},
             "type": "default",
-            "value": {"action": "deny", "confirm_id": confirm_id, "kind": kind or "local", "id": agent_id},
+            "value": {"action": "always", "confirm_id": confirm_id, "kind": kind or "local", "id": agent_id},
+        })
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "运行"},
+            "type": "primary",
+            "value": {"action": "confirm", "confirm_id": confirm_id, "kind": kind or "local", "id": agent_id},
         })
     if target.get("prUrl"):
         actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "查看 PR"},
             "url": target["prUrl"], "type": "primary"})
-    if target.get("url"):
-        actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "Agent 详情"},
-            "url": target["url"], "type": "default"})
-    if status == "NEEDS_CONFIRMATION" and target.get("url") and not confirm_id:
+
+    useful_url = target.get("url") if _is_useful_agent_url(target.get("url")) else ""
+    # Completion cards: in-card run status only — never link Agent 详情 to cursor.com
+    if status in ("FINISHED", "ERROR", "RUNNING") or (not confirm_id and status != "NEEDS_CONFIRMATION"):
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "运行情况"},
+            "type": "primary",
+            "value": {
+                "action": "agent_detail",
+                "id": agent_id,
+                "kind": kind or "",
+                "status": status,
+            },
+        })
+    if useful_url:
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "打开 Cloud Agent"},
+            "url": useful_url,
+            "type": "default",
+        })
+    if status == "NEEDS_CONFIRMATION" and useful_url and not confirm_id:
         actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "去确认"},
-            "url": target["url"], "type": "primary"})
+            "url": useful_url, "type": "primary"})
 
     if actions:
         elements.append({"tag": "action", "actions": actions})
@@ -505,6 +814,19 @@ def cursor_webhook():
     payload["chat_name"] = _chat_name_from(payload)
     payload["kind"] = "cloud"
     _register_chat(agent_id, name=payload.get("chat_name"), kind="cloud")
+    target = payload.get("target") or {}
+    source = payload.get("source") or {}
+    _remember_agent_detail(
+        agent_id,
+        chat_name=payload.get("chat_name"),
+        kind="cloud",
+        status=status,
+        summary=payload.get("summary"),
+        workspace=source.get("repository"),
+        ref=source.get("ref"),
+        url=target.get("url"),
+        pr_url=target.get("prUrl"),
+    )
 
     card = build_cursor_card(payload)
     send_card_to_chat(card)
@@ -550,18 +872,52 @@ def local_notify():
     if machine:
         summary = f"{summary}\n**机器:** {machine}"
 
+    run_metrics = {
+        "loop_count": payload.get("loop_count"),
+        "input_tokens": payload.get("input_tokens"),
+        "output_tokens": payload.get("output_tokens"),
+        "cache_read_tokens": payload.get("cache_read_tokens"),
+        "cache_write_tokens": payload.get("cache_write_tokens"),
+    }
+
     card_payload = {
         "id": agent_id,
         "status": status,
         "chat_name": chat_name,
         "kind": "local",
+        "machine": machine,
+        "model": model,
+        "workspace": workspace,
         "summary": summary,
         "source": {"repository": workspace or "local", "ref": payload.get("ref", "")},
-        "target": {"url": payload.get("url", "https://cursor.com")}
+        "target": {},
+        **{k: v for k, v in run_metrics.items() if v is not None and str(v) != ""},
     }
+    # Never default to cursor.com. Only keep a real Cloud / PR deep-link if provided.
+    raw_url = str(payload.get("url") or "").strip()
+    if _is_useful_agent_url(raw_url):
+        card_payload["target"]["url"] = raw_url
+    _remember_agent_detail(
+        agent_id,
+        chat_name=chat_name,
+        kind="local",
+        status=status,
+        summary=summary,
+        machine=machine,
+        model=model,
+        workspace=workspace,
+        ref=payload.get("ref", ""),
+        url=card_payload["target"].get("url", ""),
+        **{k: v for k, v in run_metrics.items() if v is not None and str(v) != ""},
+    )
     print(f"[Local] 收到本地 Agent 通知: agent={agent_id}, status={status}, machine={machine}", flush=True)
-    # Agent turn ended — any leftover Feishu confirm cards were handled in the Agent window.
-    _resolve_pending_for_conversation(agent_id, source="agent_window")
+    # Agent turn ended — fold leftover confirms. Under Always Run, stay silent on Feishu.
+    _active, mode = _auto_allow_state(agent_id)
+    _resolve_pending_for_conversation(
+        agent_id, source="agent_window", notify=(mode != "always")
+    )
+    # Always Run follows the Agent turn: clear when this conversation stops.
+    _clear_always_run(agent_id)
     card = build_cursor_card(card_payload)
     result = send_card_to_chat(card)
     feishu_ok = result.get("code") == 0
@@ -587,21 +943,49 @@ def local_confirm_request():
     detail = _safe_display_text(str(detail_raw), "")
     _register_chat(conversation_id, name=chat_name, machine=machine, kind="local", workspace=workspace)
 
-    # Previous pending card for this chat was almost certainly approved in Agent UI.
-    _resolve_pending_for_conversation(conversation_id, source="agent_window")
+    # Always Run / recent allow: silently allow — do NOT send another Feishu confirm card.
+    active, mode = _auto_allow_state(conversation_id)
+    if active:
+        print(
+            f"[Confirm] auto_allow skip Feishu conv={conversation_id} mode={mode} detail={detail[:80]}",
+            flush=True,
+        )
+        # Clear leftover pendings quietly under Always Run (no extra Feishu traffic).
+        if mode == "always":
+            _resolve_pending_for_conversation(
+                conversation_id, source="auto_allow", notify=False
+            )
+        return jsonify({
+            "confirm_id": "",
+            "status": "allow",
+            "auto_allow": True,
+            "always": mode == "always",
+            "message_id": "",
+        })
 
+    # Reuse a very-recent pending confirm (duplicate hook: beforeShell + Task, etc.)
     with _store_lock:
-        until = auto_allow_until.get(conversation_id) or 0
-        if until > time.time():
-            confirm_id = uuid.uuid4().hex[:16]
-            pending_confirms[confirm_id] = {
-                "status": "allow",
-                "conversation_id": conversation_id,
-                "kind": "local",
-                "detail": detail or "需要确认的操作",
-                "created": time.time(),
-            }
-            return jsonify({"confirm_id": confirm_id, "status": "allow", "auto_allow": True})
+        now = time.time()
+        for cid, rec in list(pending_confirms.items()):
+            if rec.get("conversation_id") != conversation_id:
+                continue
+            if str(rec.get("status") or "") != "pending":
+                continue
+            created = float(rec.get("created") or 0)
+            if created and (now - created) <= 8:
+                print(f"[Confirm] reuse pending {cid} age={now - created:.2f}s", flush=True)
+                return jsonify({
+                    "confirm_id": cid,
+                    "status": "pending",
+                    "auto_allow": False,
+                    "message_id": rec.get("message_id") or "",
+                    "reused": True,
+                })
+
+    # Only fold truly stale pendings (Agent already moved on), not the twin hook 1s ago.
+    _resolve_pending_for_conversation(
+        conversation_id, source="agent_window", min_age_sec=20
+    )
 
     confirm_id = uuid.uuid4().hex[:16]
     with _store_lock:
@@ -678,7 +1062,7 @@ def local_confirm_pending():
             age = now - created if created else 0
             if status == "pending" and age <= 180:
                 pass
-            elif status in ("allow", "deny", "cursor") and age <= 180:
+            elif status in ("allow", "always", "deny", "cursor") and age <= 180:
                 pass
             else:
                 continue
@@ -704,9 +1088,11 @@ def local_confirm_decide():
     decision = str(payload.get("decision") or "").strip().lower()
     source = str(payload.get("source") or "local")
     message_id = str(payload.get("message_id") or "")
-    if decision in ("allow", "confirm", "yes"):
+    if decision in ("allow", "confirm", "yes", "run"):
         decision = "allow"
-    elif decision in ("deny", "reject", "no"):
+    elif decision in ("always", "always_run", "always-run", "alwaysrun"):
+        decision = "always"
+    elif decision in ("deny", "reject", "no", "skip"):
         decision = "deny"
     elif decision in ("cursor", "ask", "deferred"):
         decision = "cursor"
@@ -725,7 +1111,7 @@ def local_confirm_decide():
     )
     if not rec:
         # Record lost (Render restart) but client still has message_id — patch card anyway.
-        if message_id and decision in ("cursor", "allow", "deny") and source in (
+        if message_id and decision in ("cursor", "allow", "always", "deny") and source in (
             "agent_window",
             "cursor",
         ):
@@ -745,7 +1131,7 @@ def local_confirm_decide():
         return jsonify({"status": "unknown"}), 404
     final = decision if applied else existing
     # Agent window resolved first -> notify Feishu group by updating the card.
-    if applied and final in ("cursor", "allow", "deny") and source in (
+    if applied and final in ("cursor", "allow", "always", "deny") and source in (
         "agent_window",
         "cursor",
         "local",
@@ -795,25 +1181,39 @@ def _set_confirm_decision(confirm_id, decision, agent_id="", kind="", source="")
             return None, False, ""
         existing = str(rec.get("status") or "")
         # Final states are immutable — prevents Feishu + Agent both acting.
-        if existing in ("allow", "deny", "cursor"):
+        if existing in ("allow", "always", "deny", "cursor"):
             return rec, False, existing
-        if decision not in ("allow", "deny", "cursor"):
+        if decision not in ("allow", "always", "deny", "cursor"):
             return rec, False, existing
         rec["status"] = decision
         rec["decided_by"] = source or kind or "unknown"
         rec["decided_at"] = time.time()
         applied = True
-        if decision == "allow":
+        if decision == "always":
             conv = rec.get("conversation_id") or agent_id
             if conv:
-                # Skip re-prompting Feishu briefly after an allow (retry / double gate).
-                auto_allow_until[conv] = time.time() + 180
+                # Always Run: session until Agent stop. Single Run does not arm silent skip.
+                always_run_chats.add(conv)
+        elif decision == "deny":
+            conv = rec.get("conversation_id") or agent_id
+            if conv:
+                always_run_chats.discard(conv)
+
+    if applied and decision == "always":
+        conv = (rec or {}).get("conversation_id") or agent_id
+        if conv:
+            # Fold twin pending cards for this chat; do not create new Feishu messages.
+            threading.Thread(
+                target=_fold_sibling_pendings,
+                kwargs={"conversation_id": conv, "decision": "always", "exclude_id": confirm_id, "source": source or "feishu"},
+                daemon=True,
+            ).start()
 
     if applied and (kind == "cloud" or (rec and rec.get("kind") == "cloud")):
         target_id = agent_id or (rec or {}).get("conversation_id")
 
         def _run_cloud():
-            if decision == "allow" and target_id:
+            if decision in ("allow", "always") and target_id:
                 cursor_followup(target_id, "已在飞书确认，请继续执行。")
             elif decision == "deny" and target_id:
                 cursor_stop_agent(target_id)
@@ -826,28 +1226,32 @@ def _confirm_result_card(confirm_id, decision, applied, existing=""):
     """Card shown after a confirm click (including duplicate clicks).
 
     Color scheme vs pending (orange):
-      allow  -> green
+      allow / always -> green
       deny   -> red
       cursor / already handled -> grey (closed / no longer actionable)
 
     Resolved cards are collapsed: colored header + details in a folded panel.
     """
-    state = existing if (not applied and existing in ("allow", "deny", "cursor")) else decision
-    if not applied and existing in ("allow", "deny", "cursor"):
+    finals = ("allow", "always", "deny", "cursor")
+    state = existing if (not applied and existing in finals) else decision
+    if not applied and existing in finals:
         by = {
-            "allow": "已处理 - 已确认（无需再点）",
-            "deny": "已处理 - 已拒绝（无需再点）",
+            "allow": "已处理 - 已运行（无需再点）",
+            "always": "已处理 - Always Run（无需再点）",
+            "deny": "已处理 - 已跳过（无需再点）",
             "cursor": "已处理 - 已在 Cursor Agent 窗口处理",
         }.get(existing, "已处理，无需重复操作")
         title = by
     elif decision == "allow":
-        title = "已处理 - 已确认，Agent 将继续"
+        title = "已处理 - 已运行，Agent 将继续"
+    elif decision == "always":
+        title = "已处理 - Always Run，本回合后续确认由 Agent 自动放行（不再发飞书）"
     elif decision == "deny":
-        title = "已处理 - 已拒绝"
+        title = "已处理 - 已跳过"
     else:
         title = "已处理 - 已在 Cursor Agent 窗口处理"
 
-    if state == "allow":
+    if state in ("allow", "always"):
         color = "green"
     elif state == "deny":
         color = "red"
@@ -986,8 +1390,13 @@ def _handle_feishu_card_action(body, new_format=True):
     confirm_id = str(value.get("confirm_id") or "")
     kind = str(value.get("kind") or "")
     agent_id = str(value.get("id") or "")
-    if act in ("confirm", "deny") and confirm_id:
-        decision = "allow" if act == "confirm" else "deny"
+    if act in ("confirm", "always", "deny") and confirm_id:
+        if act == "confirm":
+            decision = "allow"
+        elif act == "always":
+            decision = "always"
+        else:
+            decision = "deny"
         _rec, applied, existing = _set_confirm_decision(
             confirm_id, decision, agent_id=agent_id, kind=kind, source="feishu"
         )
@@ -998,10 +1407,63 @@ def _handle_feishu_card_action(body, new_format=True):
         if not applied and existing:
             toast = {"type": "info", "content": "已处理，无需重复操作"}
         elif applied and decision == "allow":
-            toast = {"type": "success", "content": "已确认"}
+            toast = {"type": "success", "content": "已运行"}
+        elif applied and decision == "always":
+            toast = {"type": "success", "content": "Always Run"}
         elif applied and decision == "deny":
-            toast = {"type": "warning", "content": "已拒绝"}
+            toast = {"type": "warning", "content": "已跳过"}
         return _feishu_card_callback_body(card, toast=toast, new_format=new_format)
+
+    if act == "agent_detail" and agent_id:
+        with _store_lock:
+            snap = dict(agent_details.get(agent_id) or {})
+        base = {
+            "id": agent_id,
+            "kind": value.get("kind") or snap.get("kind") or "",
+            "status": value.get("status") or snap.get("status") or "FINISHED",
+            "chat_name": snap.get("chat_name") or "",
+            "machine": snap.get("machine") or "",
+            "model": snap.get("model") or "",
+            "workspace": snap.get("workspace") or "",
+            "summary": snap.get("summary") or "",
+            "source": {
+                "repository": snap.get("workspace") or "",
+                "ref": snap.get("ref") or "",
+            },
+            "target": {"url": snap.get("url") or ""},
+        }
+        card = _build_agent_detail_card(agent_id, base)
+        return _feishu_card_callback_body(
+            card,
+            toast={"type": "info", "content": "已展开运行情况"},
+            new_format=new_format,
+        )
+
+    if act == "agent_summary" and agent_id:
+        with _store_lock:
+            snap = dict(agent_details.get(agent_id) or {})
+        status = snap.get("status") or "FINISHED"
+        card = build_cursor_card({
+            "id": agent_id,
+            "status": status,
+            "chat_name": snap.get("chat_name") or "",
+            "kind": snap.get("kind") or "",
+            "machine": snap.get("machine") or "",
+            "model": snap.get("model") or "",
+            "workspace": snap.get("workspace") or "",
+            "summary": snap.get("summary") or "无摘要",
+            "source": {
+                "repository": snap.get("workspace") or "local",
+                "ref": snap.get("ref") or "",
+            },
+            "target": {"url": snap.get("url") or ""} if _is_useful_agent_url(snap.get("url")) else {},
+        })
+        return _feishu_card_callback_body(
+            card,
+            toast={"type": "info", "content": "已返回摘要"},
+            new_format=new_format,
+        )
+
     return {"code": 0}
 
 
@@ -1187,6 +1649,18 @@ def poll_cursor_agents():
                             "prUrl": agent.get("prUrl", agent.get("pr_url", ""))
                         }
                     }
+                    src = payload["source"] if isinstance(payload["source"], dict) else {}
+                    _remember_agent_detail(
+                        agent_id,
+                        chat_name=chat_name,
+                        kind="cloud",
+                        status="NEEDS_CONFIRMATION",
+                        summary=payload["summary"],
+                        workspace=src.get("repository"),
+                        ref=src.get("ref"),
+                        url=payload["target"]["url"],
+                        pr_url=payload["target"].get("prUrl"),
+                    )
                     card = build_cursor_card(payload, status_label="需要确认")
                     send_card_to_chat(card)
 
@@ -1206,6 +1680,18 @@ def poll_cursor_agents():
                             "prUrl": agent.get("prUrl", agent.get("pr_url", ""))
                         }
                     }
+                    src = payload["source"] if isinstance(payload["source"], dict) else {}
+                    _remember_agent_detail(
+                        agent_id,
+                        chat_name=chat_name,
+                        kind="cloud",
+                        status=status,
+                        summary=payload["summary"],
+                        workspace=src.get("repository"),
+                        ref=src.get("ref"),
+                        url=payload["target"]["url"],
+                        pr_url=payload["target"].get("prUrl"),
+                    )
                     card = build_cursor_card(payload)
                     send_card_to_chat(card)
 
@@ -1239,10 +1725,25 @@ def test_message():
     test_payload = {
         "id": "bc_test001",
         "status": "FINISHED",
+        "kind": "local",
+        "chat_name": "测试 Chat",
+        "machine": "test-machine",
+        "model": "default",
         "summary": "测试消息：机器人已成功上线！",
         "source": {"repository": "测试仓库", "ref": "main"},
-        "target": {"url": "https://cursor.com"}
+        "target": {},
     }
+    _remember_agent_detail(
+        test_payload["id"],
+        chat_name=test_payload["chat_name"],
+        kind="local",
+        status="FINISHED",
+        summary=test_payload["summary"],
+        machine=test_payload["machine"],
+        model=test_payload["model"],
+        workspace=test_payload["source"]["repository"],
+        ref="main",
+    )
     card = build_cursor_card(test_payload)
     result = send_card_to_chat(card)
     return jsonify({"status": "sent", "success": result.get("code") == 0})

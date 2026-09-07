@@ -26,6 +26,12 @@ done
 
 log() {
   [ -n "$LOG" ] || return 0
+  HOOK_DIR_FOR_LOG="$(cd "$(dirname "$LOG")" 2>/dev/null && pwd)"
+  # shellcheck source=/dev/null
+  [ -n "$HOOK_DIR_FOR_LOG" ] && [ -f "$HOOK_DIR_FOR_LOG/log-rotate.sh" ] && . "$HOOK_DIR_FOR_LOG/log-rotate.sh"
+  if type rotate_notify_log >/dev/null 2>&1; then
+    rotate_notify_log "$LOG" || true
+  fi
   printf '[%s] watch %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>/dev/null || true
 }
 
@@ -52,9 +58,9 @@ print(d.get("status") or "")
 PY
 )"
   case "$ST" in
-    allow|deny|cursor)
+    allow|always|deny|cursor)
       log "status=$ST (Feishu or Agent/server already decided)"
-      # Feishu button already patched the card via callback when allow/deny.
+      # Feishu button already patched the card via callback when allow/always/deny.
       # cursor means Agent/server won; card should already be updating.
       exit 0
       ;;

@@ -13,7 +13,7 @@ foreach ($name in @(
     "notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd",
     "confirm-feishu.ps1", "confirm-feishu.cmd", "confirm-feishu-watch.ps1",
     "confirm-bridge.ps1", "confirm-bridge.cmd", "start-confirm-bridge.cmd",
-    "resolve-chat-name.py"
+    "resolve-chat-name.py", "log-rotate.ps1"
 )) {
     $from = Join-Path $srcDir $name
     if (-not (Test-Path -LiteralPath $from)) {

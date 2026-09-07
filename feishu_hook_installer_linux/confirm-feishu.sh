@@ -9,8 +9,13 @@ set -u
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG="$HOOK_DIR/notify-feishu.log"
 ENV_FILE="$HOOK_DIR/notify.env"
+# shellcheck source=/dev/null
+[ -f "$HOOK_DIR/log-rotate.sh" ] && . "$HOOK_DIR/log-rotate.sh"
 
 log() {
+  if type rotate_notify_log >/dev/null 2>&1; then
+    rotate_notify_log "$LOG" || true
+  fi
   printf '[%s] confirm %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>/dev/null || true
 }
 
@@ -130,7 +135,7 @@ PY
 AUTO="$(RAW_JSON="$REQ_OUT" python3 - <<'PY' 2>/dev/null || true
 import json, os
 d = json.loads(os.environ.get("RAW_JSON") or "{}")
-print("1" if d.get("auto_allow") or d.get("status") == "allow" else "0")
+print("1" if d.get("auto_allow") or d.get("status") in ("allow", "always") else "0")
 PY
 )"
 

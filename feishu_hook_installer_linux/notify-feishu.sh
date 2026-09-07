@@ -4,8 +4,13 @@ set -u
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG="$HOOK_DIR/notify-feishu.log"
 ENV_FILE="$HOOK_DIR/notify.env"
+# shellcheck source=/dev/null
+[ -f "$HOOK_DIR/log-rotate.sh" ] && . "$HOOK_DIR/log-rotate.sh"
 
 log() {
+  if type rotate_notify_log >/dev/null 2>&1; then
+    rotate_notify_log "$LOG" || true
+  fi
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>/dev/null || true
 }
 
@@ -113,7 +118,12 @@ MACHINE="$(hostname)"
 TMP="$(mktemp)"
 RAW_JSON="$RAW" ID="$ID" STATUS="$STATUS" MACHINE="$MACHINE" WORKSPACE="$WORKSPACE" MODEL="$MODEL" CHAT_NAME="$CHAT_NAME" python3 - <<'PY' >"$TMP"
 import json, os
-print(json.dumps({
+raw = {}
+try:
+    raw = json.loads(os.environ.get("RAW_JSON") or "{}")
+except Exception:
+    raw = {}
+out = {
     "event": "statusChange",
     "id": os.environ.get("ID", ""),
     "conversation_id": os.environ.get("ID", ""),
@@ -122,7 +132,11 @@ print(json.dumps({
     "workspace": os.environ.get("WORKSPACE", ""),
     "model": os.environ.get("MODEL", ""),
     "chat_name": os.environ.get("CHAT_NAME", ""),
-}, ensure_ascii=False))
+}
+for key in ("loop_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+    if key in raw and raw[key] is not None:
+        out[key] = raw[key]
+print(json.dumps(out, ensure_ascii=False))
 PY
 
 log "post $NOTIFY_URL id=$ID status=$STATUS"

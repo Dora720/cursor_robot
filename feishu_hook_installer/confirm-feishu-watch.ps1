@@ -14,10 +14,22 @@ $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
+if ($LogPath) {
+    $rotatePs1 = Join-Path (Split-Path -Parent $LogPath) "log-rotate.ps1"
+    if (Test-Path -LiteralPath $rotatePs1) {
+        try { . $rotatePs1 } catch {}
+    }
+}
+
 function Write-Log([string]$msg) {
     if (-not $LogPath) { return }
     $line = "[{0}] watch {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
-    try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch {}
+    try {
+        if (Get-Command Rotate-NotifyLog -ErrorAction SilentlyContinue) {
+            Rotate-NotifyLog -LogFile $LogPath
+        }
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+    } catch {}
 }
 
 function Get-Status {
@@ -58,16 +70,17 @@ function Test-NameMatch([string]$name, [string[]]$names, [bool]$allowContains) {
     return $false
 }
 
+$script:AlwaysNames = @(
+    "Always Run", "Always Allow", "Always approve", "Add to allowlist", "Add to Allowlist"
+)
 $script:AllowNames = @(
     "Run", "Allow", "Approve", "Accept", "Continue", "Confirm",
-    "Allow once", "Run command", "Run everything", "Add to allowlist",
-    "运行", "允许", "批准", "确认", "继续", "执行", "允许一次"
+    "Allow once", "Run command", "Run All"
 )
 $script:DenyNames = @(
-    "Deny", "Reject", "Skip", "Cancel", "Block",
-    "拒绝", "取消", "跳过", "阻止"
+    "Skip", "Deny", "Reject", "Cancel", "Block"
 )
-$script:AskNames = $script:AllowNames + $script:DenyNames
+$script:AskNames = $script:AlwaysNames + $script:AllowNames + $script:DenyNames
 
 function Get-CursorWindows($root) {
     $list = New-Object System.Collections.Generic.List[object]
@@ -172,13 +185,17 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
     $decision = Get-Status
 
-    if ($decision -in @("allow", "deny", "cursor")) {
+    if ($decision -in @("allow", "always", "deny", "cursor")) {
         if ($decision -eq "cursor") {
             Write-Log "Agent window already decided; skip Feishu click"
             $acted = $true
             break
         }
-        if ($decision -eq "allow") {
+        if ($decision -eq "always") {
+            $ok = Invoke-AgentButton $script:AlwaysNames
+            if (-not $ok) { $ok = Invoke-AgentButton $script:AllowNames }
+            Write-Log ("feishu always -> agent click ok=$ok")
+        } elseif ($decision -eq "allow") {
             $ok = Invoke-AgentButton $script:AllowNames
             Write-Log ("feishu allow -> agent click ok=$ok")
         } else {
