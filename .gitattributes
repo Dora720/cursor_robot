@@ -1,0 +1,4 @@
+# Force LF for Linux installer scripts (avoid /usr/bin/env: bash\r)
+feishu_hook_installer_linux/**/*.sh text eol=lf
+feishu_hook_installer_linux/**/*.py text eol=lf
+feishu_hook_installer_linux/**/notify.env.example text eol=lf
