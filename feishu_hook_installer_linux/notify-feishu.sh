@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# NOTE: this file must use LF line endings (not CRLF).
 # Notify Feishu when a Cursor Agent turn stops (Linux / Remote SSH).
 set -u
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"

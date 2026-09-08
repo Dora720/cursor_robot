@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# NOTE: this file must use LF line endings (not CRLF).
 # Uninstall Feishu notify hooks on Linux / Cursor Remote SSH.
 # Usage:
 #   cd feishu_hook_installer_linux

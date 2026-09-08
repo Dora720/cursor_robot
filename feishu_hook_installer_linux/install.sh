@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# NOTE: this file must use LF line endings (not CRLF).
 # Install Feishu notify hooks for Linux / Cursor Remote SSH.
 # Usage (on the remote Linux host):
 #   cd feishu_hook_installer_linux

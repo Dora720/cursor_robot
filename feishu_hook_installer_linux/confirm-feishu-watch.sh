@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# NOTE: this file must use LF line endings (not CRLF).
 # Background watcher: Feishu decision updates server/card.
 # Remote Linux cannot click the local Cursor Agent Allow button (no UIA).
 set -u

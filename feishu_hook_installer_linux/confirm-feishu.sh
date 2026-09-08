@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# NOTE: this file must use LF line endings (not CRLF).
 # Peer confirm for Linux / Remote SSH (same idea as Windows):
 # 1) Send Feishu card
 # 2) Immediately return permission=ask (local Cursor Agent window can confirm now)

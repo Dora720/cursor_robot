@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# NOTE: this file must use LF line endings (not CRLF).
 # Shared log rotation: keep notify-feishu.log under ~1MB (discard older bytes).
 # Usage: source this file, then call rotate_notify_log "$LOG" before append.
 LOG_MAX_BYTES="${LOG_MAX_BYTES:-1048576}"
