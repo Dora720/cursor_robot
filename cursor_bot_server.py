@@ -109,8 +109,9 @@ pending_confirms = {}       # confirm_id -> record
 pending_followups = {}      # conversation_id -> [text, ...]
 feishu_msg_to_chat = {}     # feishu message_id -> conversation_id
 last_active_chat = {"id": ""}
-# Always Run is session-scoped: armed until this chat's Agent turn stops.
-always_run_chats = set()
+# Always Run: per-conversation command allowlist until Agent turn stops.
+# conversation_id -> set of normalized command strings
+always_run_allowlist = {}
 # conversation_id / agent_id -> last known detail snapshot for Feishu "Agent 详情"
 agent_details = {}
 
@@ -287,34 +288,67 @@ def notify_confirm_resolved(confirm_id, decision, source="", message_id=""):
         patch_card_message(message_id, compact)
 
 
-def _arm_auto_allow(conversation_id, mode="always", ttl_sec=None):
-    """Arm Always Run silent skip for a conversation until Agent stop.
+def _normalize_allow_cmd(detail):
+    """Normalize a command/tool string for Always Run allowlist matching."""
+    text = " ".join(str(detail or "").strip().split())
+    return text[:500]
 
-    Single Run does not arm anything — twins are handled by pending reuse only.
-    """
-    if not conversation_id:
-        return
-    if mode != "always":
-        return
+
+def _allowlist_get(conversation_id):
     with _store_lock:
-        always_run_chats.add(conversation_id)
+        return list(always_run_allowlist.get(conversation_id) or [])
+
+
+def _allowlist_add(conversation_id, detail):
+    """Add one command to this chat's Always Run allowlist (until Agent stop)."""
+    cmd = _normalize_allow_cmd(detail)
+    if not conversation_id or not cmd:
+        return []
+    with _store_lock:
+        bucket = always_run_allowlist.setdefault(conversation_id, set())
+        bucket.add(cmd)
+        return list(bucket)
+
+
+def _allowlist_match(conversation_id, detail):
+    cmd = _normalize_allow_cmd(detail)
+    if not conversation_id or not cmd:
+        return False
+    cmd_first = cmd.split(" ", 1)[0].lower()
+    with _store_lock:
+        bucket = always_run_allowlist.get(conversation_id) or set()
+        if cmd in bucket:
+            return True
+        for item in bucket:
+            if cmd.startswith(item) or item.startswith(cmd):
+                return True
+            item_first = item.split(" ", 1)[0].lower()
+            if cmd_first and item_first and cmd_first == item_first:
+                return True
+    return False
+
+
+def _arm_auto_allow(conversation_id, mode="always", ttl_sec=None, detail=""):
+    """Arm Always Run for a specific command until Agent stop."""
+    if not conversation_id or mode != "always":
+        return
+    _allowlist_add(conversation_id, detail)
 
 
 def _clear_always_run(conversation_id):
-    """Clear Always Run when Agent turn ends or user skips/denies."""
+    """Clear Always Run allowlist when Agent turn ends or user skips/denies."""
     if not conversation_id:
         return
     with _store_lock:
-        always_run_chats.discard(conversation_id)
+        always_run_allowlist.pop(conversation_id, None)
 
 
-def _auto_allow_state(conversation_id):
-    """Return (active: bool, mode: str). Only Always Run is silent; single Run is not."""
+def _auto_allow_state(conversation_id, detail=""):
+    """Return (active: bool, mode: str). Only matching allowlisted commands are silent."""
     if not conversation_id:
         return False, ""
-    with _store_lock:
-        if conversation_id in always_run_chats:
-            return True, "always"
+    if _allowlist_match(conversation_id, detail):
+        return True, "always"
     return False, ""
 
 
@@ -398,7 +432,21 @@ def _register_chat(conversation_id, **meta):
         return
     with _store_lock:
         row = chat_registry.get(conversation_id, {})
+        new_aliases = meta.pop("aliases", None) if "aliases" in meta else None
         row.update({k: v for k, v in meta.items() if v})
+        aliases = list(row.get("aliases") or [])
+        for a in (new_aliases or []):
+            if a and a not in aliases:
+                aliases.append(a)
+        name = row.get("name") or ""
+        if name and name not in aliases:
+            aliases.append(name)
+        ws = str(row.get("workspace") or "").replace(chr(92), "/").rstrip("/")
+        leaf = os.path.basename(ws) if ws else ""
+        if leaf and leaf not in aliases:
+            aliases.append(leaf)
+        if aliases:
+            row["aliases"] = aliases
         row["last_seen"] = time.time()
         chat_registry[conversation_id] = row
         last_active_chat["id"] = conversation_id
@@ -412,16 +460,19 @@ def _normalize_workspace(workspace):
 
 
 def _chat_name_from(payload, workspace=""):
+    workspace = _normalize_workspace(workspace or payload.get("workspace") or "")
+    ws_leaf = os.path.basename(workspace.replace(chr(92), "/").rstrip("/")) if workspace else ""
     name = (
         payload.get("chat_name")
         or payload.get("conversation_title")
         or payload.get("title")
-        or payload.get("name")
         or ""
     )
     name = _safe_display_text(name, "")
-    if not name and workspace:
-        name = os.path.basename(workspace.replace("\\", "/").rstrip("/"))
+    if not name and ws_leaf:
+        name = ws_leaf
+    if not name:
+        name = _safe_display_text(payload.get("name") or "", "")
     return name or ""
 
 
@@ -679,6 +730,13 @@ def build_cursor_card(payload, status_label=None):
     kind = payload.get("kind") or ""
     machine = payload.get("machine") or ""
     model = payload.get("model") or ""
+    detail_cmd = _safe_display_text(str(payload.get("detail") or ""), "")
+    always_cmds = payload.get("always_run_commands") or []
+    if not isinstance(always_cmds, list):
+        always_cmds = []
+    always_existing = payload.get("always_run_existing") or []
+    if not isinstance(always_existing, list):
+        always_existing = []
 
     status_map = {
         "FINISHED": ("✅ Cursor Agent 执行完成", "green"),
@@ -709,12 +767,29 @@ def build_cursor_card(payload, status_label=None):
     ]
 
     if confirm_id or status == "NEEDS_CONFIRMATION":
+        always_lines = [
+            "确认方式（与 Cursor Agent 同序）：**跳过 / Always Run / 运行**；飞书或 Agent 窗口先点的生效。",
+        ]
+        show_cmd = detail_cmd or (always_cmds[0] if always_cmds else "")
+        if show_cmd:
+            always_lines.append("**Always Run 将加入白名单的命令：**")
+            always_lines.append(f"- `{show_cmd[:300]}`")
+        else:
+            always_lines.append("**Always Run 将加入白名单的命令：**（当前未解析到具体命令）")
+        if always_existing:
+            always_lines.append("**本回合已在白名单：**")
+            for c in always_existing[:8]:
+                c = _safe_display_text(str(c), "")
+                if c:
+                    always_lines.append(f"- `{c[:300]}`")
+        always_lines.append(
+            "说明：Always Run 只自动放行白名单中的命令（同 Chat 内跨回合仍有效）；其他命令仍会确认。点「跳过」会清空白名单。"
+        )
+        always_lines.append(
+            f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
+        )
         elements.append({"tag": "div", "text": {"tag": "lark_md",
-            "content": (
-                f"确认方式（与 Cursor Agent 同序）：**跳过 / Always Run / 运行**；飞书或 Agent 窗口先点的生效。\n"
-                f"Always Run：点 Agent 的 Always Run，本回合内后续确认不再发飞书（回合结束即取消）。\n"
-                f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
-            )}})
+            "content": chr(10).join(always_lines)}})
     else:
         elements.append({"tag": "div", "text": {"tag": "lark_md",
             "content": (
@@ -911,13 +986,12 @@ def local_notify():
         **{k: v for k, v in run_metrics.items() if v is not None and str(v) != ""},
     )
     print(f"[Local] 收到本地 Agent 通知: agent={agent_id}, status={status}, machine={machine}", flush=True)
-    # Agent turn ended — fold leftover confirms. Under Always Run, stay silent on Feishu.
-    _active, mode = _auto_allow_state(agent_id)
+    # Agent turn ended — fold leftover confirms.
+    # Keep Always Run allowlist across turns (same chat); only Skip/Deny clears it.
+    had_always = bool(_allowlist_get(agent_id))
     _resolve_pending_for_conversation(
-        agent_id, source="agent_window", notify=(mode != "always")
+        agent_id, source="agent_window", notify=(not had_always)
     )
-    # Always Run follows the Agent turn: clear when this conversation stops.
-    _clear_always_run(agent_id)
     card = build_cursor_card(card_payload)
     result = send_card_to_chat(card)
     feishu_ok = result.get("code") == 0
@@ -944,7 +1018,7 @@ def local_confirm_request():
     _register_chat(conversation_id, name=chat_name, machine=machine, kind="local", workspace=workspace)
 
     # Always Run / recent allow: silently allow — do NOT send another Feishu confirm card.
-    active, mode = _auto_allow_state(conversation_id)
+    active, mode = _auto_allow_state(conversation_id, detail)
     if active:
         print(
             f"[Confirm] auto_allow skip Feishu conv={conversation_id} mode={mode} detail={detail[:80]}",
@@ -961,6 +1035,8 @@ def local_confirm_request():
             "auto_allow": True,
             "always": mode == "always",
             "message_id": "",
+            "allowlist": _allowlist_get(conversation_id),
+            "matched": _normalize_allow_cmd(detail),
         })
 
     # Reuse a very-recent pending confirm (duplicate hook: beforeShell + Task, etc.)
@@ -1009,6 +1085,9 @@ def local_confirm_request():
         "chat_name": chat_name,
         "confirm_id": confirm_id,
         "kind": "local",
+        "detail": detail,
+        "always_run_commands": [detail] if detail else [],
+        "always_run_existing": _allowlist_get(conversation_id),
         "summary": "\n".join(summary_lines),
         "source": {"repository": workspace or "local", "ref": ""},
         "target": {},
@@ -1041,7 +1120,13 @@ def local_confirm_status(confirm_id):
         return jsonify({"status": "unknown"}), 404
     if time.time() - rec.get("created", 0) > 180 and rec.get("status") == "pending":
         rec["status"] = "timeout"
-    return jsonify({"status": rec.get("status"), "conversation_id": rec.get("conversation_id")})
+    conv = rec.get("conversation_id") or ""
+    return jsonify({
+        "status": rec.get("status"),
+        "conversation_id": conv,
+        "detail": rec.get("detail") or "",
+        "allowlist": _allowlist_get(conv) if conv else [],
+    })
 
 
 @app.route("/local-confirm/pending", methods=["GET"])
@@ -1146,11 +1231,19 @@ def local_confirm_decide():
                 )
             except Exception as exc:
                 print(f"[Confirm] feishu notify failed: {exc}", flush=True)
+    conv = ""
+    detail = ""
+    if rec:
+        conv = rec.get("conversation_id") or ""
+        detail = rec.get("detail") or ""
     return jsonify({
         "status": final,
         "confirm_id": confirm_id,
         "applied": applied,
         "existing": existing,
+        "conversation_id": conv,
+        "detail": detail,
+        "allowlist": _allowlist_get(conv) if conv else [],
     })
 
 
@@ -1191,13 +1284,14 @@ def _set_confirm_decision(confirm_id, decision, agent_id="", kind="", source="")
         applied = True
         if decision == "always":
             conv = rec.get("conversation_id") or agent_id
-            if conv:
-                # Always Run: session until Agent stop. Single Run does not arm silent skip.
-                always_run_chats.add(conv)
+            cmd = _normalize_allow_cmd(rec.get("detail") or "")
+            if conv and cmd:
+                bucket = always_run_allowlist.setdefault(conv, set())
+                bucket.add(cmd)
         elif decision == "deny":
             conv = rec.get("conversation_id") or agent_id
             if conv:
-                always_run_chats.discard(conv)
+                always_run_allowlist.pop(conv, None)
 
     if applied and decision == "always":
         conv = (rec or {}).get("conversation_id") or agent_id
@@ -1245,7 +1339,7 @@ def _confirm_result_card(confirm_id, decision, applied, existing=""):
     elif decision == "allow":
         title = "已处理 - 已运行，Agent 将继续"
     elif decision == "always":
-        title = "已处理 - Always Run，本回合后续确认由 Agent 自动放行（不再发飞书）"
+        title = "已处理 - Always Run，已将命令加入本回合白名单"
     elif decision == "deny":
         title = "已处理 - 已跳过"
     else:
@@ -1267,6 +1361,7 @@ def _confirm_result_card(confirm_id, decision, applied, existing=""):
         if conv and conv in chat_registry:
             chat_name = _safe_display_text(str(chat_registry[conv].get("name") or ""), "")
 
+    allowlist_now = _allowlist_get(conv) if conv else []
     detail_lines = [
         "此确认已处理。",
         "两端只需操作一次：先点的生效，另一端再点无效。",
@@ -1275,6 +1370,14 @@ def _confirm_result_card(confirm_id, decision, applied, existing=""):
         detail_lines.insert(0, f"Chat: {chat_name}")
     if detail and detail != "需要确认的操作":
         detail_lines.append(f"详情: {detail[:200]}")
+    if state == "always" or decision == "always":
+        if detail and detail != "需要确认的操作":
+            detail_lines.append(f"已加入白名单: {detail[:300]}")
+        if allowlist_now:
+            detail_lines.append("本回合白名单:")
+            for c in allowlist_now[:10]:
+                detail_lines.append(f"- {c[:300]}")
+        detail_lines.append("仅白名单中的命令会自动放行（同 Chat 跨回合有效）；其他命令仍会确认。点跳过会清空。")
     detail_lines.append(f"confirm_id={confirm_id}")
 
     # Default collapsed so the group timeline stays short after either side resolves.
@@ -1357,15 +1460,24 @@ def _patch_confirm_card(confirm_id, card):
 
 
 def _find_chat_id_by_name(name):
-    """Exact match on conversation_id or registered chat name. No fallback."""
+    """Exact match on conversation_id, registered chat name, workspace leaf, or aliases."""
     name = (name or "").strip()
     if not name:
         return ""
     with _store_lock:
         if name in chat_registry:
             return name
+        name_l = name.lower()
         for cid, meta in chat_registry.items():
             if name == (meta.get("name") or ""):
+                return cid
+            ws = str(meta.get("workspace") or "").replace(chr(92), "/").rstrip("/")
+            if ws and name == os.path.basename(ws):
+                return cid
+            aliases = meta.get("aliases") or []
+            if isinstance(aliases, (list, tuple)) and name in aliases:
+                return cid
+            if name_l and name_l == str(meta.get("name") or "").lower():
                 return cid
     return ""
 

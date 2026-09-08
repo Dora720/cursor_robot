@@ -105,8 +105,9 @@ $id = [string]$data.conversation_id
 if (-not $id) { $id = [string]$data.session_id }
 if (-not $id) { $id = "local-agent" }
 
-$chatName = [string]$data.conversation_title
-if (-not $chatName) { $chatName = [string]$data.title }
+# Agents Window labels chats by workspace folder (e.g. cursor_robot), not composer auto-title.
+$chatName = ""
+if ($workspace) { $chatName = Split-Path -Path $workspace -Leaf }
 if (-not $chatName) {
     $py = Join-Path $hookDir "resolve-chat-name.py"
     $python = Get-Command python -ErrorAction SilentlyContinue
@@ -121,19 +122,12 @@ if (-not $chatName) {
         } catch {}
     }
 }
-if (-not $chatName -and $workspace) { $chatName = Split-Path -Path $workspace -Leaf }
+if (-not $chatName) { $chatName = [string]$data.conversation_title }
+if (-not $chatName) { $chatName = [string]$data.title }
 Write-Log ("chat_name={0}" -f $chatName)
 
-# Clear Always Run flag for this conversation when the Agent turn stops.
-try {
-    $alwaysDir = Join-Path $hookDir "always-run"
-    $alwaysSafe = ($id -replace "[^\w\-]", "_")
-    $alwaysFlag = Join-Path $alwaysDir $alwaysSafe
-    if ($id -and (Test-Path -LiteralPath $alwaysFlag)) {
-        Remove-Item -LiteralPath $alwaysFlag -Force -ErrorAction SilentlyContinue
-        Write-Log ("cleared local always-run conv={0}" -f $id)
-    }
-} catch {}
+# Keep Always Run allowlist across Agent turns (Cursor-like).
+# Cleared only when user clicks Skip/Deny for this chat (server + local sync).
 
 # Do not put Chinese literals in this script (Windows PowerShell file encoding).
 $bodyObj = @{

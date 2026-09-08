@@ -108,10 +108,16 @@ ID="$(py_json_get "$RAW" conversation_id)"
 
 WORKSPACE="$(py_json_get "$RAW" workspace_roots)"
 MODEL="$(py_json_get "$RAW" model)"
-CHAT_NAME="$(py_json_get "$RAW" conversation_title)"
-[ -z "$CHAT_NAME" ] && CHAT_NAME="$(py_json_get "$RAW" title)"
-if [ -z "$CHAT_NAME" ] && [ -n "$WORKSPACE" ]; then
+# Agents Window uses workspace folder name as the chat label.
+CHAT_NAME=""
+if [ -n "$WORKSPACE" ]; then
   CHAT_NAME="$(basename "$WORKSPACE")"
+fi
+if [ -z "$CHAT_NAME" ]; then
+  CHAT_NAME="$(py_json_get "$RAW" conversation_title)"
+fi
+if [ -z "$CHAT_NAME" ]; then
+  CHAT_NAME="$(py_json_get "$RAW" title)"
 fi
 MACHINE="$(hostname)"
 

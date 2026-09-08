@@ -83,18 +83,37 @@ $script:DenyNames = @(
 )
 $script:AskNames = $script:AlwaysNames + $script:AllowNames + $script:DenyNames
 
-function Arm-LocalAlwaysRun([string]$convId) {
+$script:ConfirmDetail = ""
+try {
+    $st0 = & curl.exe -sS -m 15 -H "X-Notify-Token: $Token" $StatusUrl 2>$null | ConvertFrom-Json
+    if ($st0.detail) { $script:ConfirmDetail = [string]$st0.detail }
+    if ($st0.conversation_id -and -not $ConversationId) { $ConversationId = [string]$st0.conversation_id }
+} catch {}
+
+
+function Arm-LocalAlwaysRun([string]$convId, [string]$command = "") {
     if (-not $convId) { return }
     try {
-        $hookDir = Split-Path -Parent $LogPath
-        if (-not $hookDir) { $hookDir = $PSScriptRoot }
-        $dir = Join-Path $hookDir "always-run"
+        $localHookDir = Split-Path -Parent $LogPath
+        if (-not $localHookDir) { $localHookDir = $PSScriptRoot }
+        $dir = Join-Path $localHookDir "always-run"
         if (-not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
         }
         $safe = ($convId -replace "[^\w\-]", "_")
-        [System.IO.File]::WriteAllText((Join-Path $dir $safe), $convId, [System.Text.UTF8Encoding]::new($false))
-        Write-Log ("armed local always-run conv=$convId")
+        $flag = Join-Path $dir $safe
+        $cmds = New-Object System.Collections.Generic.List[string]
+        if (Test-Path -LiteralPath $flag) {
+            try {
+                $raw = [System.IO.File]::ReadAllText($flag, [System.Text.Encoding]::UTF8).Trim()
+                $obj = $raw | ConvertFrom-Json
+                foreach ($c in @($obj.commands)) { if ($c) { [void]$cmds.Add([string]$c) } }
+            } catch {}
+        }
+        if ($command -and ($cmds -notcontains $command)) { [void]$cmds.Add($command) }
+        $json = (@{ commands = @($cmds) } | ConvertTo-Json -Compress)
+        [System.IO.File]::WriteAllText($flag, $json, [System.Text.UTF8Encoding]::new($false))
+        Write-Log ("armed local always-run conv=$convId cmd=$command n=$($cmds.Count)")
     } catch {
         Write-Log ("arm always-run failed: {0}" -f $_.Exception.Message)
     }
@@ -262,7 +281,16 @@ while ((Get-Date) -lt $deadline) {
             $ok = Invoke-AgentButton $script:AlwaysNames
             if (-not $ok) { $ok = Invoke-AgentButton $script:AllowNames }
             Write-Log ("feishu always -> agent click ok=$ok")
-            Arm-LocalAlwaysRun $ConversationId
+            try {
+                $stA = & curl.exe -sS -m 15 -H "X-Notify-Token: $Token" $StatusUrl 2>$null | ConvertFrom-Json
+                if ($stA.detail) { $script:ConfirmDetail = [string]$stA.detail }
+                if ($stA.allowlist) {
+                    foreach ($c in @($stA.allowlist)) {
+                        Arm-LocalAlwaysRun $ConversationId ([string]$c)
+                    }
+                }
+            } catch {}
+            Arm-LocalAlwaysRun $ConversationId $script:ConfirmDetail
         } elseif ($decision -eq "allow") {
             $ok = Invoke-AgentButton $script:AllowNames
             Write-Log ("feishu allow -> agent click ok=$ok")
@@ -287,7 +315,7 @@ while ((Get-Date) -lt $deadline) {
         elseif ($lastChoice -eq "allow") { $dec = "allow" }
         Write-Log ("Agent ask UI closed first; mark $dec lastChoice=$lastChoice")
         Send-Decide $dec "agent_window"
-        if ($dec -eq "always") { Arm-LocalAlwaysRun $ConversationId }
+        if ($dec -eq "always") { Arm-LocalAlwaysRun $ConversationId $script:ConfirmDetail }
         $acted = $true
         break
     }

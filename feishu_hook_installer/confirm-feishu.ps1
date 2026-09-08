@@ -81,8 +81,9 @@ if (-not $id) { $id = [string]$data.session_id }
 if (-not $id) { $id = "local-agent" }
 $workspace = ""
 if ($data.workspace_roots) { $workspace = [string]@($data.workspace_roots)[0] }
-$chatName = [string]$data.conversation_title
-if (-not $chatName) { $chatName = [string]$data.title }
+# Agents Window labels chats by workspace folder (e.g. cursor_robot), not composer auto-title.
+$chatName = ""
+if ($workspace) { $chatName = Split-Path -Path $workspace -Leaf }
 if (-not $chatName) {
     $py = Join-Path $hookDir "resolve-chat-name.py"
     $python = Get-Command python -ErrorAction SilentlyContinue
@@ -97,23 +98,81 @@ if (-not $chatName) {
         } catch {}
     }
 }
-if (-not $chatName -and $workspace) { $chatName = Split-Path -Path $workspace -Leaf }
+if (-not $chatName) { $chatName = [string]$data.conversation_title }
+if (-not $chatName) { $chatName = [string]$data.title }
 Write-Log ("confirm chat_name={0}" -f $chatName)
-
-# Our hooks force ask for peer confirm, which overrides Cursor's own Always Run.
-# After Agent/Feishu Always Run, bridge arms a local flag so later confirms allow silently.
-$alwaysDir = Join-Path $hookDir "always-run"
-$alwaysSafe = ($id -replace "[^\w\-]", "_")
-$alwaysFlag = Join-Path $alwaysDir $alwaysSafe
-if ($id -and (Test-Path -LiteralPath $alwaysFlag)) {
-    Write-Log "confirm local always-run armed; permission=allow (skip Feishu)"
-    Write-Perm "allow"
-    exit 0
-}
 
 $detail = [string]$data.command
 if (-not $detail) { $detail = [string]$data.tool_name }
+if (-not $detail) { $detail = [string]$data.tool }
 if (-not $detail) { $detail = "tool" }
+Write-Log ("confirm detail={0}" -f $detail)
+
+function Get-AlwaysRunCommands([string]$flagPath) {
+    $list = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $flagPath)) { return $list }
+    try {
+        $raw = [System.IO.File]::ReadAllText($flagPath, [System.Text.Encoding]::UTF8).Trim()
+        if (-not $raw) { return $list }
+        try {
+            $obj = $raw | ConvertFrom-Json
+            foreach ($c in @($obj.commands)) {
+                if ($c) { [void]$list.Add([string]$c) }
+            }
+        } catch {
+            # Legacy plain conversation-id file: treat as session-wide allow-all marker.
+            if ($raw -eq $id) { [void]$list.Add("*") }
+        }
+    } catch {}
+    return $list
+}
+
+function Get-CmdFingerprint([string]$cmd) {
+    if (-not $cmd) { return "" }
+    $s = ($cmd -replace "\s+", " ").Trim()
+    return $s
+}
+
+function Test-CmdAllowlisted([string]$cmd, $commands) {
+    if (-not $cmd -or -not $commands -or $commands.Count -eq 0) { return $false }
+    $cmd = Get-CmdFingerprint $cmd
+    $cmdFirst = ($cmd -split " ", 2)[0]
+    foreach ($c in $commands) {
+        if (-not $c) { continue }
+        if ($c -eq "*") { return $true }
+        $c = Get-CmdFingerprint $c
+        if ($cmd -eq $c) { return $true }
+        if ($cmd.StartsWith($c) -or $c.StartsWith($cmd)) { return $true }
+        $cFirst = ($c -split " ", 2)[0]
+        # Same executable / tool name (e.g. git / python / Shell)
+        if ($cmdFirst -and $cFirst -and ($cmdFirst -ieq $cFirst)) { return $true }
+    }
+    return $false
+}
+
+function Save-AlwaysRunCommands([string]$flagPath, $commands) {
+    $dir = Split-Path -Parent $flagPath
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+    $uniq = @()
+    foreach ($c in @($commands)) {
+        if ($c -and ($uniq -notcontains $c)) { $uniq += [string]$c }
+    }
+    $json = (@{ commands = $uniq } | ConvertTo-Json -Compress)
+    [System.IO.File]::WriteAllText($flagPath, $json, [System.Text.UTF8Encoding]::new($false))
+}
+
+# Local Always Run allowlist (per command) — persists across Agent turns until Skip.
+$alwaysDir = Join-Path $hookDir "always-run"
+$alwaysSafe = ($id -replace "[^\w\-]", "_")
+$alwaysFlag = Join-Path $alwaysDir $alwaysSafe
+$localCmds = Get-AlwaysRunCommands $alwaysFlag
+if ($id -and (Test-CmdAllowlisted $detail $localCmds)) {
+    Write-Log ("confirm local always-run match detail={0}" -f $detail)
+    Write-Perm "allow"
+    exit 0
+}
 
 $reqUrl = $url -replace "/local-notify$", "/local-confirm/request"
 $reqObj = @{
@@ -145,14 +204,13 @@ try {
 if ($autoAllow) {
     Write-Log "confirm auto_allow from server"
     try {
-        if ($reqParsed.always -eq $true -or [string]$reqParsed.status -eq "always") {
-            $alwaysDir = Join-Path $hookDir "always-run"
-            if (-not (Test-Path -LiteralPath $alwaysDir)) {
-                New-Item -ItemType Directory -Force -Path $alwaysDir | Out-Null
-            }
-            $alwaysSafe = ($id -replace "[^\w\-]", "_")
-            [System.IO.File]::WriteAllText((Join-Path $alwaysDir $alwaysSafe), $id, [System.Text.UTF8Encoding]::new($false))
-            Write-Log ("armed local always-run from server conv={0}" -f $id)
+        $cmds = @()
+        if ($reqParsed.allowlist) { $cmds = @($reqParsed.allowlist) }
+        if ($reqParsed.matched) { $cmds += [string]$reqParsed.matched }
+        if (-not $cmds -and $detail) { $cmds = @($detail) }
+        if ($cmds.Count -gt 0) {
+            Save-AlwaysRunCommands $alwaysFlag $cmds
+            Write-Log ("synced local always-run allowlist conv={0} n={1}" -f $id, $cmds.Count)
         }
     } catch {}
     Write-Perm "allow"

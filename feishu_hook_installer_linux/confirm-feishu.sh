@@ -89,15 +89,50 @@ ID="$(py_json_get "$RAW" conversation_id)"
 [ -z "$ID" ] && ID="$(py_json_get "$RAW" session_id)"
 [ -z "$ID" ] && ID="local-agent"
 WORKSPACE="$(py_json_get "$RAW" workspace_roots)"
-CHAT_NAME="$(py_json_get "$RAW" conversation_title)"
-[ -z "$CHAT_NAME" ] && CHAT_NAME="$(py_json_get "$RAW" title)"
-if [ -z "$CHAT_NAME" ] && [ -n "$WORKSPACE" ]; then
+# Agents Window uses workspace folder name as the chat label.
+CHAT_NAME=""
+if [ -n "$WORKSPACE" ]; then
   CHAT_NAME="$(basename "$WORKSPACE")"
+fi
+if [ -z "$CHAT_NAME" ]; then
+  CHAT_NAME="$(py_json_get "$RAW" conversation_title)"
+fi
+if [ -z "$CHAT_NAME" ]; then
+  CHAT_NAME="$(py_json_get "$RAW" title)"
 fi
 DETAIL="$(py_json_get "$RAW" command)"
 [ -z "$DETAIL" ] && DETAIL="$(py_json_get "$RAW" tool_name)"
 [ -z "$DETAIL" ] && DETAIL="tool"
 MACHINE="$(hostname)"
+
+# Local Always Run allowlist (JSON: {"commands":["..."]})
+ALWAYS_DIR="${HOOK_DIR}/always-run"
+ALWAYS_SAFE="$(printf '%s' "$ID" | tr -c 'A-Za-z0-9_-' '_')"
+ALWAYS_FLAG="${ALWAYS_DIR}/${ALWAYS_SAFE}"
+if [ -f "$ALWAYS_FLAG" ] && [ -n "$DETAIL" ]; then
+  if DETAIL="$DETAIL" ALWAYS_FLAG="$ALWAYS_FLAG" ID="$ID" python3 - <<'PY'
+import json, os, sys
+detail = (os.environ.get("DETAIL") or "").strip()
+path = os.environ.get("ALWAYS_FLAG") or ""
+raw = ""
+try:
+    raw = open(path, "r", encoding="utf-8").read().strip()
+    data = json.loads(raw)
+    cmds = [str(c) for c in (data.get("commands") or []) if c]
+except Exception:
+    cmds = ["*"] if raw == (os.environ.get("ID") or "") else []
+for c in cmds:
+    if c == "*" or c == detail or detail.startswith(c) or c.startswith(detail):
+        sys.exit(0)
+sys.exit(1)
+PY
+  then
+    log "local always-run match"
+    printf '%s\n' '{"permission":"allow"}'
+    exit 0
+  fi
+fi
+
 
 REQ_URL="${NOTIFY_URL%/local-notify}/local-confirm/request"
 REQ_TMP="$(mktemp)"
@@ -141,6 +176,30 @@ PY
 
 if [ "$AUTO" = "1" ]; then
   log "auto_allow"
+  mkdir -p "$ALWAYS_DIR"
+  RAW_JSON="$REQ_OUT" DETAIL="$DETAIL" ALWAYS_FLAG="$ALWAYS_FLAG" python3 - <<'PY' || true
+import json, os
+path = os.environ.get("ALWAYS_FLAG") or ""
+detail = (os.environ.get("DETAIL") or "").strip()
+cmds = []
+try:
+    d = json.loads(os.environ.get("RAW_JSON") or "{}")
+    cmds = [str(c) for c in (d.get("allowlist") or []) if c]
+    if d.get("matched"):
+        cmds.append(str(d.get("matched")))
+except Exception:
+    pass
+if detail:
+    cmds.append(detail)
+# unique
+seen = set(); out = []
+for c in cmds:
+    if c and c not in seen:
+        seen.add(c); out.append(c)
+if path and out:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w", encoding="utf-8").write(json.dumps({"commands": out}, ensure_ascii=False))
+PY
   write_perm allow
   exit 0
 fi

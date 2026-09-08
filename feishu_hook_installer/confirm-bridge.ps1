@@ -65,32 +65,32 @@ $pendingUrl = ($url -replace "/local-notify$", "/local-confirm/pending")
 $decideUrl = ($url -replace "/local-notify$", "/local-confirm/decide")
 $alwaysRunDir = Join-Path $hookDir "always-run"
 
-function Arm-LocalAlwaysRun([string]$convId) {
+function Arm-LocalAlwaysRun([string]$convId, [string]$command = "") {
     if (-not $convId) { return }
     try {
-        if (-not (Test-Path -LiteralPath $alwaysRunDir)) {
-            New-Item -ItemType Directory -Force -Path $alwaysRunDir | Out-Null
+        $dir = Join-Path $hookDir "always-run"
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
         }
         $safe = ($convId -replace "[^\w\-]", "_")
-        [System.IO.File]::WriteAllText((Join-Path $alwaysRunDir $safe), $convId, [System.Text.UTF8Encoding]::new($false))
-        Write-Log ("armed local always-run conv=$convId")
+        $flag = Join-Path $dir $safe
+        $cmds = New-Object System.Collections.Generic.List[string]
+        if (Test-Path -LiteralPath $flag) {
+            try {
+                $raw = [System.IO.File]::ReadAllText($flag, [System.Text.Encoding]::UTF8).Trim()
+                $obj = $raw | ConvertFrom-Json
+                foreach ($c in @($obj.commands)) { if ($c) { [void]$cmds.Add([string]$c) } }
+            } catch {}
+        }
+        if ($command -and ($cmds -notcontains $command)) { [void]$cmds.Add($command) }
+        if ($cmds.Count -eq 0 -and $command) { [void]$cmds.Add($command) }
+        $json = (@{ commands = @($cmds) } | ConvertTo-Json -Compress)
+        [System.IO.File]::WriteAllText($flag, $json, [System.Text.UTF8Encoding]::new($false))
+        Write-Log ("armed local always-run conv=$convId cmd=$command n=$($cmds.Count)")
     } catch {
         Write-Log ("arm always-run failed: {0}" -f $_.Exception.Message)
     }
 }
-
-# Cursor Agent order: Skip | Always Run | Run — keep Always separate from once-Run.
-$script:AlwaysNames = @(
-    "Always Run", "Always Allow", "Always approve", "Add to allowlist", "Add to Allowlist"
-)
-$script:AllowNames = @(
-    "Run", "Allow", "Approve", "Accept", "Continue", "Confirm",
-    "Allow once", "Run command", "Run All"
-)
-$script:DenyNames = @(
-    "Skip", "Deny", "Reject", "Cancel", "Block"
-)
-$script:AskNames = $script:AlwaysNames + $script:AllowNames + $script:DenyNames
 
 function Test-NameMatch([string]$name, [string[]]$names) {
     if (-not $name) { return $false }
@@ -375,14 +375,14 @@ while ($true) {
                 $ok = Invoke-AgentButton $script:AlwaysNames -PreferAlways -NoSendKeys
                 if ($ok) {
                     Write-Log ("feishu always -> click ok id=$cid")
-                    Arm-LocalAlwaysRun ([string]$it.conversation_id)
+                    Arm-LocalAlwaysRun ([string]$it.conversation_id) ([string]$it.detail)
                     $st.acted = $true
                 } else {
                     # Fallback: once-Run still unblocks Agent; server already auto-allows later.
                     $ok2 = Invoke-AgentButton $script:AllowNames -ExcludeAlways
                     if ($ok2) {
                         Write-Log ("feishu always -> fallback Run click ok id=$cid")
-                        Arm-LocalAlwaysRun ([string]$it.conversation_id)
+                        Arm-LocalAlwaysRun ([string]$it.conversation_id) ([string]$it.detail)
                         $st.acted = $true
                     } else {
                         $st.failCount++
@@ -437,7 +437,7 @@ while ($true) {
                 Write-Log ("ask UI closed first; mark $dec id=$cid lastChoice=$($st.lastChoice)")
                 Send-Decide $cid $dec "agent_window" $msgId
                 if ($dec -eq "always") {
-                    Arm-LocalAlwaysRun ([string]$it.conversation_id)
+                    Arm-LocalAlwaysRun ([string]$it.conversation_id) ([string]$it.detail)
                 }
                 $st.acted = $true
             }

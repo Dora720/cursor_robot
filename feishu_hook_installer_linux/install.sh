@@ -21,7 +21,7 @@ need() {
 need curl
 need python3
 
-for name in notify-feishu.sh confirm-feishu.sh confirm-feishu-watch.sh ping-hook.sh log-rotate.sh; do
+for name in notify-feishu.sh confirm-feishu.sh confirm-feishu-watch.sh ping-hook.sh log-rotate.sh resolve-chat-name.py; do
   if [ ! -f "${SRC_DIR}/${name}" ]; then
     echo "ERROR: missing ${SRC_DIR}/${name}" >&2
     exit 1
