@@ -94,6 +94,7 @@ try {
 function Arm-LocalAlwaysRun([string]$convId, [string]$command = "") {
     if (-not $convId) { return }
     try {
+        if (-not $command) { $command = "*" }
         $localHookDir = Split-Path -Parent $LogPath
         if (-not $localHookDir) { $localHookDir = $PSScriptRoot }
         $dir = Join-Path $localHookDir "always-run"
@@ -126,6 +127,20 @@ function Test-IsAlwaysName([string]$name) {
     return ($t -like "Always Run*" -or $t -like "Always Allow*" -or $t -like "Add to allowlist*")
 }
 
+
+function Get-InteractiveElements($win) {
+    $list = New-Object System.Collections.Generic.List[object]
+    try {
+        $btn = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Button)
+        foreach ($el in $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btn)) {
+            $list.Add($el)
+        }
+    } catch {}
+    return $list
+}
+
 function Get-AgentApprovalChoice {
     try {
         Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop | Out-Null
@@ -134,19 +149,26 @@ function Get-AgentApprovalChoice {
     } catch { return "" }
 
     $candidates = New-Object System.Collections.Generic.List[string]
+    $pt = $null
+    try { $pt = [System.Windows.Forms.Cursor]::Position } catch { $pt = $null }
+
+    # 1) Element under mouse + parents
     try {
-        $pt = [System.Windows.Forms.Cursor]::Position
-        $el = [System.Windows.Automation.AutomationElement]::FromPoint(
-            (New-Object System.Windows.Point([double]$pt.X, [double]$pt.Y)))
-        $cur = $el
-        for ($i = 0; $i -lt 5 -and $cur; $i++) {
-            try {
-                $n = [string]$cur.Current.Name
-                if ($n) { $candidates.Add($n) }
-            } catch {}
-            try { $cur = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($cur) } catch { break }
+        if ($pt) {
+            $el = [System.Windows.Automation.AutomationElement]::FromPoint(
+                (New-Object System.Windows.Point([double]$pt.X, [double]$pt.Y)))
+            $cur = $el
+            for ($i = 0; $i -lt 6 -and $cur; $i++) {
+                try {
+                    $n = [string]$cur.Current.Name
+                    if ($n) { $candidates.Add($n) }
+                } catch {}
+                try { $cur = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($cur) } catch { break }
+            }
         }
     } catch {}
+
+    # 2) Focused element
     try {
         $fe = [System.Windows.Automation.AutomationElement]::FocusedElement
         if ($fe) {
@@ -155,8 +177,38 @@ function Get-AgentApprovalChoice {
             if ($n) { $candidates.Add($n) }
         }
     } catch {}
+
+    # 3) Hit-test Cursor windows: any approval button whose rect contains the mouse
+    try {
+        if ($pt -and (Get-Command Get-CursorWindows -ErrorAction SilentlyContinue)) {
+            $root = [System.Windows.Automation.AutomationElement]::RootElement
+            foreach ($win in (Get-CursorWindows $root)) {
+                $els = @()
+                if (Get-Command Get-InteractiveElements -ErrorAction SilentlyContinue) {
+                    $els = @(Get-InteractiveElements $win)
+                }
+                foreach ($el in $els) {
+                    $n = ""
+                    try { $n = [string]$el.Current.Name } catch { continue }
+                    if (-not $n) { continue }
+                    $isApproval = (Test-IsAlwaysName $n) -or (Test-NameMatch $n $script:AllowNames $false) -or (Test-NameMatch $n $script:DenyNames $false)
+                    if (-not $isApproval) { continue }
+                    try {
+                        $r = $el.Current.BoundingRectangle
+                        if ($pt.X -ge $r.X -and $pt.X -le ($r.X + $r.Width) -and $pt.Y -ge $r.Y -and $pt.Y -le ($r.Y + $r.Height)) {
+                            $candidates.Insert(0, $n)
+                        }
+                    } catch {}
+                }
+            }
+        }
+    } catch {}
+
     foreach ($n in $candidates) {
         if (Test-IsAlwaysName $n) { return "always" }
+        if ($n.Trim() -like "Always Run*" -or $n.Trim() -like "Always Allow*" -or $n.Trim() -like "Add to allowlist*" -or $n -match "始终|总是运行|总是允许") {
+            return "always"
+        }
     }
     foreach ($n in $candidates) {
         if (Test-NameMatch $n $script:DenyNames $false) { return "deny" }
@@ -268,7 +320,7 @@ $acted = $false
 $lastChoice = ""
 
 while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 250
+    Start-Sleep -Milliseconds 80
     $decision = Get-Status
 
     if ($decision -in @("allow", "always", "deny", "cursor")) {
@@ -307,7 +359,11 @@ while ((Get-Date) -lt $deadline) {
         if (-not $seenAsk) { Write-Log "agent ask UI visible" }
         $seenAsk = $true
         $choice = Get-AgentApprovalChoice
-        if ($choice) { $lastChoice = $choice }
+        if ($choice) {
+            if ($choice -eq "always") { $lastChoice = "always" }
+            elseif ($choice -eq "deny") { $lastChoice = "deny" }
+            elseif ($lastChoice -ne "always") { $lastChoice = $choice }
+        }
     } elseif ($seenAsk) {
         $dec = "cursor"
         if ($lastChoice -eq "always") { $dec = "always" }

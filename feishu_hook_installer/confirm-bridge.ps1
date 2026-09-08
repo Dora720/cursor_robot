@@ -68,6 +68,7 @@ $alwaysRunDir = Join-Path $hookDir "always-run"
 function Arm-LocalAlwaysRun([string]$convId, [string]$command = "") {
     if (-not $convId) { return }
     try {
+        if (-not $command) { $command = "*" }
         $dir = Join-Path $hookDir "always-run"
         if (-not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -83,7 +84,6 @@ function Arm-LocalAlwaysRun([string]$convId, [string]$command = "") {
             } catch {}
         }
         if ($command -and ($cmds -notcontains $command)) { [void]$cmds.Add($command) }
-        if ($cmds.Count -eq 0 -and $command) { [void]$cmds.Add($command) }
         $json = (@{ commands = @($cmds) } | ConvertTo-Json -Compress)
         [System.IO.File]::WriteAllText($flag, $json, [System.Text.UTF8Encoding]::new($false))
         Write-Log ("armed local always-run conv=$convId cmd=$command n=$($cmds.Count)")
@@ -172,24 +172,33 @@ function Test-AgentAskVisible {
 }
 
 function Get-AgentApprovalChoice {
-    # Prefer element under mouse (user click), then keyboard focus.
-    try { Ensure-Uia } catch { return "" }
-    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue | Out-Null } catch {}
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop | Out-Null
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop | Out-Null
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue | Out-Null
+    } catch { return "" }
 
     $candidates = New-Object System.Collections.Generic.List[string]
+    $pt = $null
+    try { $pt = [System.Windows.Forms.Cursor]::Position } catch { $pt = $null }
+
+    # 1) Element under mouse + parents
     try {
-        $pt = [System.Windows.Forms.Cursor]::Position
-        $el = [System.Windows.Automation.AutomationElement]::FromPoint(
-            (New-Object System.Windows.Point([double]$pt.X, [double]$pt.Y)))
-        $cur = $el
-        for ($i = 0; $i -lt 5 -and $cur; $i++) {
-            try {
-                $n = [string]$cur.Current.Name
-                if ($n) { $candidates.Add($n) }
-            } catch {}
-            try { $cur = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($cur) } catch { break }
+        if ($pt) {
+            $el = [System.Windows.Automation.AutomationElement]::FromPoint(
+                (New-Object System.Windows.Point([double]$pt.X, [double]$pt.Y)))
+            $cur = $el
+            for ($i = 0; $i -lt 6 -and $cur; $i++) {
+                try {
+                    $n = [string]$cur.Current.Name
+                    if ($n) { $candidates.Add($n) }
+                } catch {}
+                try { $cur = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($cur) } catch { break }
+            }
         }
     } catch {}
+
+    # 2) Focused element
     try {
         $fe = [System.Windows.Automation.AutomationElement]::FocusedElement
         if ($fe) {
@@ -198,21 +207,36 @@ function Get-AgentApprovalChoice {
             if ($n) { $candidates.Add($n) }
         }
     } catch {}
-    $root = [System.Windows.Automation.AutomationElement]::RootElement
-    foreach ($win in (Get-CursorWindows $root)) {
-        foreach ($el in (Get-InteractiveElements $win)) {
-            $focused = $false
-            try { $focused = [bool]$el.Current.HasKeyboardFocus } catch { $focused = $false }
-            if (-not $focused) { continue }
-            try {
-                $n = [string]$el.Current.Name
-                if ($n) { $candidates.Add($n) }
-            } catch {}
+
+    # 3) Hit-test Cursor windows: any approval button whose rect contains the mouse
+    try {
+        if ($pt -and (Get-Command Get-CursorWindows -ErrorAction SilentlyContinue)) {
+            $root = [System.Windows.Automation.AutomationElement]::RootElement
+            foreach ($win in (Get-CursorWindows $root)) {
+                $els = @()
+                if (Get-Command Get-InteractiveElements -ErrorAction SilentlyContinue) {
+                    $els = @(Get-InteractiveElements $win)
+                }
+                foreach ($el in $els) {
+                    $n = ""
+                    try { $n = [string]$el.Current.Name } catch { continue }
+                    if (-not $n) { continue }
+                    $isApproval = (Test-IsAlwaysName $n) -or (Test-NameMatch $n $script:AllowNames) -or (Test-NameMatch $n $script:DenyNames)
+                    if (-not $isApproval) { continue }
+                    try {
+                        $r = $el.Current.BoundingRectangle
+                        if ($pt.X -ge $r.X -and $pt.X -le ($r.X + $r.Width) -and $pt.Y -ge $r.Y -and $pt.Y -le ($r.Y + $r.Height)) {
+                            $candidates.Insert(0, $n)
+                        }
+                    } catch {}
+                }
+            }
         }
-    }
+    } catch {}
+
     foreach ($n in $candidates) {
         if (Test-IsAlwaysName $n) { return "always" }
-        if ($n.Trim() -like "Always Run*" -or $n.Trim() -like "Always Allow*" -or $n.Trim() -like "Add to allowlist*") {
+        if ($n.Trim() -like "Always Run*" -or $n.Trim() -like "Always Allow*" -or $n.Trim() -like "Add to allowlist*" -or $n -match "始终|总是运行|总是允许") {
             return "always"
         }
     }
@@ -427,7 +451,11 @@ while ($true) {
                 if (-not $st.seenAsk) { Write-Log ("ask UI visible id=$cid") }
                 $st.seenAsk = $true
                 $choice = Get-AgentApprovalChoice
-                if ($choice) { $st.lastChoice = $choice }
+                if ($choice) {
+                    if ($choice -eq "always") { $st.lastChoice = "always" }
+                    elseif ($choice -eq "deny") { $st.lastChoice = "deny" }
+                    elseif ($st.lastChoice -ne "always") { $st.lastChoice = $choice }
+                }
             } elseif ($st.seenAsk) {
                 # Agent window decided first. If user picked Always Run, arm session silent-allow.
                 $dec = "cursor"
@@ -453,5 +481,5 @@ while ($true) {
     foreach ($k in @($state.Keys)) {
         if ($state[$k].seenAsk -and -not $state[$k].acted) { $fast = $true; break }
     }
-    if ($fast) { Start-Sleep -Milliseconds 200 } else { Start-Sleep -Seconds 1 }
+    if ($fast) { Start-Sleep -Milliseconds 80 } else { Start-Sleep -Seconds 1 }
 }
