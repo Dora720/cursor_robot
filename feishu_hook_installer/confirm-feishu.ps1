@@ -159,17 +159,28 @@ function Save-AlwaysRunCommands([string]$flagPath, $commands) {
     foreach ($c in @($commands)) {
         if ($c -and ($uniq -notcontains $c)) { $uniq += [string]$c }
     }
-    $json = (@{ commands = $uniq } | ConvertTo-Json -Compress)
+    $json = (@{ commands = $uniq; scope = "machine" } | ConvertTo-Json -Compress)
     [System.IO.File]::WriteAllText($flagPath, $json, [System.Text.UTF8Encoding]::new($false))
 }
 
-# Local Always Run allowlist (per command) — persists across Agent turns until Skip.
+# Machine-wide Always Run allowlist (shared by all Agents on this PC).
 $alwaysDir = Join-Path $hookDir "always-run"
-$alwaysSafe = ($id -replace "[^\w\-]", "_")
-$alwaysFlag = Join-Path $alwaysDir $alwaysSafe
+$alwaysFlag = Join-Path $alwaysDir "shared.json"
 $localCmds = Get-AlwaysRunCommands $alwaysFlag
-if ($id -and (Test-CmdAllowlisted $detail $localCmds)) {
-    Write-Log ("confirm local always-run match detail={0}" -f $detail)
+# Merge legacy per-conversation files once into the in-memory list.
+try {
+    if (Test-Path -LiteralPath $alwaysDir) {
+        Get-ChildItem -LiteralPath $alwaysDir -File -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Name -eq "shared.json") { return }
+            $more = Get-AlwaysRunCommands $_.FullName
+            foreach ($c in $more) {
+                if ($c -and ($localCmds -notcontains $c)) { [void]$localCmds.Add($c) }
+            }
+        }
+    }
+} catch {}
+if ($detail -and (Test-CmdAllowlisted $detail $localCmds)) {
+    Write-Log ("confirm local always-run match scope=machine detail={0}" -f $detail)
     Write-Perm "allow"
     exit 0
 }
@@ -210,7 +221,7 @@ if ($autoAllow) {
         if (-not $cmds -and $detail) { $cmds = @($detail) }
         if ($cmds.Count -gt 0) {
             Save-AlwaysRunCommands $alwaysFlag $cmds
-            Write-Log ("synced local always-run allowlist conv={0} n={1}" -f $id, $cmds.Count)
+            Write-Log ("synced local always-run allowlist scope=machine n={0}" -f $cmds.Count)
         }
     } catch {}
     Write-Perm "allow"

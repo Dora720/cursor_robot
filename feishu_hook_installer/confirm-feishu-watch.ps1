@@ -91,18 +91,44 @@ try {
 } catch {}
 
 
+function Get-SharedAlwaysRunPath([string]$baseHookDir) {
+    $dir = Join-Path $baseHookDir "always-run"
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+    return (Join-Path $dir "shared.json")
+}
+
+function Merge-LegacyAlwaysRunFiles([string]$baseHookDir, [System.Collections.Generic.List[string]]$cmds) {
+    $dir = Join-Path $baseHookDir "always-run"
+    if (-not (Test-Path -LiteralPath $dir)) { return }
+    Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Name -eq "shared.json") { return }
+        try {
+            $raw = [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8).Trim()
+            if (-not $raw) { return }
+            try {
+                $obj = $raw | ConvertFrom-Json
+                foreach ($c in @($obj.commands)) {
+                    if ($c -and ($cmds -notcontains [string]$c)) { [void]$cmds.Add([string]$c) }
+                }
+            } catch {
+                # legacy plain conversation-id file => treat as chat-wide "*"
+                if ($raw -and ($cmds -notcontains "*")) { [void]$cmds.Add("*") }
+            }
+        } catch {}
+    }
+}
+
 function Arm-LocalAlwaysRun([string]$convId, [string]$command = "") {
-    if (-not $convId) { return }
+    # Machine-wide allowlist: shared by all Agents on this PC.
     try {
         if (-not $command) { $command = "*" }
-        $localHookDir = Split-Path -Parent $LogPath
-        if (-not $localHookDir) { $localHookDir = $PSScriptRoot }
-        $dir = Join-Path $localHookDir "always-run"
-        if (-not (Test-Path -LiteralPath $dir)) {
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        }
-        $safe = ($convId -replace "[^\w\-]", "_")
-        $flag = Join-Path $dir $safe
+        $base = $null
+        try { if ($LogPath) { $base = Split-Path -Parent $LogPath } } catch {}
+        if (-not $base) { $base = $PSScriptRoot }
+        if (-not $base) { $base = $hookDir }
+        $flag = Get-SharedAlwaysRunPath $base
         $cmds = New-Object System.Collections.Generic.List[string]
         if (Test-Path -LiteralPath $flag) {
             try {
@@ -111,10 +137,11 @@ function Arm-LocalAlwaysRun([string]$convId, [string]$command = "") {
                 foreach ($c in @($obj.commands)) { if ($c) { [void]$cmds.Add([string]$c) } }
             } catch {}
         }
+        Merge-LegacyAlwaysRunFiles $base $cmds
         if ($command -and ($cmds -notcontains $command)) { [void]$cmds.Add($command) }
-        $json = (@{ commands = @($cmds) } | ConvertTo-Json -Compress)
+        $json = (@{ commands = @($cmds); scope = "machine" } | ConvertTo-Json -Compress)
         [System.IO.File]::WriteAllText($flag, $json, [System.Text.UTF8Encoding]::new($false))
-        Write-Log ("armed local always-run conv=$convId cmd=$command n=$($cmds.Count)")
+        Write-Log ("armed local always-run scope=machine cmd=$command n=$($cmds.Count) conv=$convId")
     } catch {
         Write-Log ("arm always-run failed: {0}" -f $_.Exception.Message)
     }

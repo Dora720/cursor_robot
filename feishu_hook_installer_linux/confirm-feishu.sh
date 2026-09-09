@@ -106,34 +106,58 @@ DETAIL="$(py_json_get "$RAW" command)"
 [ -z "$DETAIL" ] && DETAIL="tool"
 MACHINE="$(hostname)"
 
-# Local Always Run allowlist (JSON: {"commands":["..."]})
+# Machine-wide Always Run allowlist (shared by all Agents on this host).
 ALWAYS_DIR="${HOOK_DIR}/always-run"
-ALWAYS_SAFE="$(printf '%s' "$ID" | tr -c 'A-Za-z0-9_-' '_')"
-ALWAYS_FLAG="${ALWAYS_DIR}/${ALWAYS_SAFE}"
-if [ -f "$ALWAYS_FLAG" ] && [ -n "$DETAIL" ]; then
-  if DETAIL="$DETAIL" ALWAYS_FLAG="$ALWAYS_FLAG" ID="$ID" python3 - <<'PY'
+ALWAYS_FLAG="${ALWAYS_DIR}/shared.json"
+if [ -n "$DETAIL" ]; then
+  if DETAIL="$DETAIL" ALWAYS_DIR="$ALWAYS_DIR" ALWAYS_FLAG="$ALWAYS_FLAG" python3 - <<'PY'
 import json, os, sys
+from pathlib import Path
 detail = (os.environ.get("DETAIL") or "").strip()
-path = os.environ.get("ALWAYS_FLAG") or ""
-raw = ""
-try:
-    raw = open(path, "r", encoding="utf-8").read().strip()
-    data = json.loads(raw)
-    cmds = [str(c) for c in (data.get("commands") or []) if c]
-except Exception:
-    cmds = ["*"] if raw == (os.environ.get("ID") or "") else []
+cmds = []
+paths = []
+flag = os.environ.get("ALWAYS_FLAG") or ""
+adir = os.environ.get("ALWAYS_DIR") or ""
+if flag:
+    paths.append(Path(flag))
+if adir:
+    p = Path(adir)
+    if p.is_dir():
+        for f in p.iterdir():
+            if f.is_file() and f.name != "shared.json":
+                paths.append(f)
+seen = set()
+for path in paths:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+            for c in (data.get("commands") or []):
+                s = str(c)
+                if s and s not in seen:
+                    seen.add(s); cmds.append(s)
+        except Exception:
+            if raw and "*" not in seen:
+                seen.add("*"); cmds.append("*")
+    except Exception:
+        pass
+first = detail.split(" ", 1)[0].lower() if detail else ""
 for c in cmds:
     if c == "*" or c == detail or detail.startswith(c) or c.startswith(detail):
+        sys.exit(0)
+    cfirst = c.split(" ", 1)[0].lower() if c else ""
+    if first and cfirst and first == cfirst:
         sys.exit(0)
 sys.exit(1)
 PY
   then
-    log "local always-run match"
+    log "local always-run match scope=machine"
     printf '%s\n' '{"permission":"allow"}'
     exit 0
   fi
 fi
-
 
 REQ_URL="${NOTIFY_URL%/local-notify}/local-confirm/request"
 REQ_TMP="$(mktemp)"

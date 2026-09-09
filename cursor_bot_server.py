@@ -109,8 +109,8 @@ pending_confirms = {}       # confirm_id -> record
 pending_followups = {}      # conversation_id -> [text, ...]
 feishu_msg_to_chat = {}     # feishu message_id -> conversation_id
 last_active_chat = {"id": ""}
-# Always Run: per-conversation command allowlist until Agent turn stops.
-# conversation_id -> set of normalized command strings
+# Always Run: machine-wide command allowlist (shared by all Agents on that PC).
+# key = machine:<name> or conv:<id> -> set of normalized command strings
 always_run_allowlist = {}
 # conversation_id / agent_id -> last known detail snapshot for Feishu "Agent 详情"
 agent_details = {}
@@ -294,60 +294,108 @@ def _normalize_allow_cmd(detail):
     return text[:500]
 
 
-def _allowlist_get(conversation_id):
-    with _store_lock:
-        return list(always_run_allowlist.get(conversation_id) or [])
+def _allowlist_scope(machine="", conversation_id=""):
+    """Prefer machine-wide scope so all Agents on one PC share the allowlist."""
+    m = str(machine or "").strip()
+    if m:
+        return f"machine:{m}"
+    c = str(conversation_id or "").strip()
+    if c:
+        return f"conv:{c}"
+    return ""
 
 
-def _allowlist_add(conversation_id, detail):
-    """Add one command to this chat's Always Run allowlist (until Agent stop)."""
-    cmd = _normalize_allow_cmd(detail)
-    if not conversation_id or not cmd:
+def _allowlist_get(machine="", conversation_id=""):
+    key = _allowlist_scope(machine, conversation_id)
+    if not key:
         return []
     with _store_lock:
-        bucket = always_run_allowlist.setdefault(conversation_id, set())
+        return list(always_run_allowlist.get(key) or [])
+
+
+def _allowlist_add(machine="", conversation_id="", detail=""):
+    """Add one command to this machine's Always Run allowlist (shared by all Agents)."""
+    cmd = _normalize_allow_cmd(detail)
+    key = _allowlist_scope(machine, conversation_id)
+    if not key or not cmd:
+        return []
+    with _store_lock:
+        bucket = always_run_allowlist.setdefault(key, set())
         bucket.add(cmd)
         return list(bucket)
 
 
-def _allowlist_match(conversation_id, detail):
+def _allowlist_remove_cmd(machine="", conversation_id="", detail=""):
+    """Remove one command from machine allowlist (Skip/Deny)."""
     cmd = _normalize_allow_cmd(detail)
-    if not conversation_id or not cmd:
+    key = _allowlist_scope(machine, conversation_id)
+    if not key or not cmd:
+        return []
+    with _store_lock:
+        bucket = always_run_allowlist.get(key) or set()
+        bucket.discard(cmd)
+        # Also drop wildcard if present when user explicitly skips.
+        if cmd != "*":
+            pass
+        if not bucket:
+            always_run_allowlist.pop(key, None)
+            return []
+        always_run_allowlist[key] = bucket
+        return list(bucket)
+
+
+def _allowlist_match(machine="", conversation_id="", detail=""):
+    cmd = _normalize_allow_cmd(detail)
+    if not cmd:
         return False
     cmd_first = cmd.split(" ", 1)[0].lower()
+    keys = []
+    k1 = _allowlist_scope(machine, conversation_id)
+    if k1:
+        keys.append(k1)
+    # Soft-read legacy per-conversation buckets if machine key is used.
+    c = str(conversation_id or "").strip()
+    if c:
+        legacy = f"conv:{c}"
+        if legacy not in keys:
+            keys.append(legacy)
+        if c not in keys:
+            keys.append(c)  # very old key without prefix
     with _store_lock:
-        bucket = always_run_allowlist.get(conversation_id) or set()
-        if cmd in bucket:
-            return True
-        for item in bucket:
-            if cmd.startswith(item) or item.startswith(cmd):
+        for key in keys:
+            bucket = always_run_allowlist.get(key) or set()
+            if not bucket:
+                continue
+            if cmd in bucket or "*" in bucket:
                 return True
-            item_first = item.split(" ", 1)[0].lower()
-            if cmd_first and item_first and cmd_first == item_first:
-                return True
+            for item in bucket:
+                if cmd.startswith(item) or item.startswith(cmd):
+                    return True
+                item_first = item.split(" ", 1)[0].lower()
+                if cmd_first and item_first and cmd_first == item_first:
+                    return True
     return False
 
 
-def _arm_auto_allow(conversation_id, mode="always", ttl_sec=None, detail=""):
-    """Arm Always Run for a specific command until Agent stop."""
-    if not conversation_id or mode != "always":
+def _arm_auto_allow(conversation_id, mode="always", ttl_sec=None, detail="", machine=""):
+    """Arm Always Run for a command on this machine (all Agents share it)."""
+    if mode != "always":
         return
-    _allowlist_add(conversation_id, detail)
+    _allowlist_add(machine=machine, conversation_id=conversation_id, detail=detail)
 
 
-def _clear_always_run(conversation_id):
-    """Clear Always Run allowlist when Agent turn ends or user skips/denies."""
-    if not conversation_id:
+def _clear_always_run(machine="", conversation_id=""):
+    """Clear machine allowlist (legacy helper). Prefer _allowlist_remove_cmd for Skip."""
+    key = _allowlist_scope(machine, conversation_id)
+    if not key:
         return
     with _store_lock:
-        always_run_allowlist.pop(conversation_id, None)
+        always_run_allowlist.pop(key, None)
 
 
-def _auto_allow_state(conversation_id, detail=""):
-    """Return (active: bool, mode: str). Only matching allowlisted commands are silent."""
-    if not conversation_id:
-        return False, ""
-    if _allowlist_match(conversation_id, detail):
+def _auto_allow_state(conversation_id, detail="", machine=""):
+    """Return (active: bool, mode: str). Matching allowlisted commands are silent."""
+    if _allowlist_match(machine=machine, conversation_id=conversation_id, detail=detail):
         return True, "always"
     return False, ""
 
@@ -783,7 +831,7 @@ def build_cursor_card(payload, status_label=None):
                 if c:
                     always_lines.append(f"- `{c[:300]}`")
         always_lines.append(
-            "说明：Always Run 只自动放行白名单中的命令（同 Chat 内跨回合仍有效）；其他命令仍会确认。点「跳过」会清空白名单。"
+            "说明：Always Run 只自动放行白名单中的命令（同机所有 Agent 共用，跨 Chat 有效）；其他命令仍会确认。点「跳过」会从白名单移除该命令。"
         )
         always_lines.append(
             f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
@@ -988,7 +1036,7 @@ def local_notify():
     print(f"[Local] 收到本地 Agent 通知: agent={agent_id}, status={status}, machine={machine}", flush=True)
     # Agent turn ended — fold leftover confirms.
     # Keep Always Run allowlist across turns (same chat); only Skip/Deny clears it.
-    had_always = bool(_allowlist_get(agent_id))
+    had_always = bool(_allowlist_get(machine=machine, conversation_id=agent_id))
     _resolve_pending_for_conversation(
         agent_id, source="agent_window", notify=(not had_always)
     )
@@ -1018,7 +1066,7 @@ def local_confirm_request():
     _register_chat(conversation_id, name=chat_name, machine=machine, kind="local", workspace=workspace)
 
     # Always Run / recent allow: silently allow — do NOT send another Feishu confirm card.
-    active, mode = _auto_allow_state(conversation_id, detail)
+    active, mode = _auto_allow_state(conversation_id, detail, machine=machine)
     if active:
         print(
             f"[Confirm] auto_allow skip Feishu conv={conversation_id} mode={mode} detail={detail[:80]}",
@@ -1035,7 +1083,7 @@ def local_confirm_request():
             "auto_allow": True,
             "always": mode == "always",
             "message_id": "",
-            "allowlist": _allowlist_get(conversation_id),
+            "allowlist": _allowlist_get(machine=machine, conversation_id=conversation_id),
             "matched": _normalize_allow_cmd(detail),
         })
 
@@ -1070,6 +1118,7 @@ def local_confirm_request():
             "conversation_id": conversation_id,
             "kind": "local",
             "detail": detail or "需要确认的操作",
+            "machine": machine,
             "created": time.time(),
             "message_id": "",
         }
@@ -1087,7 +1136,7 @@ def local_confirm_request():
         "kind": "local",
         "detail": detail,
         "always_run_commands": [detail] if detail else [],
-        "always_run_existing": _allowlist_get(conversation_id),
+        "always_run_existing": _allowlist_get(machine=machine, conversation_id=conversation_id),
         "summary": "\n".join(summary_lines),
         "source": {"repository": workspace or "local", "ref": ""},
         "target": {},
@@ -1125,7 +1174,7 @@ def local_confirm_status(confirm_id):
         "status": rec.get("status"),
         "conversation_id": conv,
         "detail": rec.get("detail") or "",
-        "allowlist": _allowlist_get(conv) if conv else [],
+        "allowlist": _allowlist_get(machine=(rec.get("machine") or ""), conversation_id=conv) if conv or rec.get("machine") else [],
     })
 
 
@@ -1243,7 +1292,7 @@ def local_confirm_decide():
         "existing": existing,
         "conversation_id": conv,
         "detail": detail,
-        "allowlist": _allowlist_get(conv) if conv else [],
+        "allowlist": _allowlist_get(machine=(rec.get("machine") or ""), conversation_id=conv) if conv or rec.get("machine") else [],
     })
 
 
@@ -1284,14 +1333,24 @@ def _set_confirm_decision(confirm_id, decision, agent_id="", kind="", source="")
         applied = True
         if decision == "always":
             conv = rec.get("conversation_id") or agent_id
+            mach = rec.get("machine") or ""
             cmd = _normalize_allow_cmd(rec.get("detail") or "")
-            if conv and cmd:
-                bucket = always_run_allowlist.setdefault(conv, set())
+            if cmd and (mach or conv):
+                key = _allowlist_scope(mach, conv)
+                bucket = always_run_allowlist.setdefault(key, set())
                 bucket.add(cmd)
         elif decision == "deny":
             conv = rec.get("conversation_id") or agent_id
-            if conv:
-                always_run_allowlist.pop(conv, None)
+            mach = rec.get("machine") or ""
+            cmd = _normalize_allow_cmd(rec.get("detail") or "")
+            if cmd and (mach or conv):
+                key = _allowlist_scope(mach, conv)
+                bucket = always_run_allowlist.get(key) or set()
+                bucket.discard(cmd)
+                if not bucket:
+                    always_run_allowlist.pop(key, None)
+                else:
+                    always_run_allowlist[key] = bucket
 
     if applied and decision == "always":
         conv = (rec or {}).get("conversation_id") or agent_id
@@ -1361,7 +1420,7 @@ def _confirm_result_card(confirm_id, decision, applied, existing=""):
         if conv and conv in chat_registry:
             chat_name = _safe_display_text(str(chat_registry[conv].get("name") or ""), "")
 
-    allowlist_now = _allowlist_get(conv) if conv else []
+    allowlist_now = _allowlist_get(machine=(rec.get("machine") or ""), conversation_id=conv) if (conv or rec.get("machine")) else []
     detail_lines = [
         "此确认已处理。",
         "两端只需操作一次：先点的生效，另一端再点无效。",
@@ -1377,7 +1436,7 @@ def _confirm_result_card(confirm_id, decision, applied, existing=""):
             detail_lines.append("本回合白名单:")
             for c in allowlist_now[:10]:
                 detail_lines.append(f"- {c[:300]}")
-        detail_lines.append("仅白名单中的命令会自动放行（同 Chat 跨回合有效）；其他命令仍会确认。点跳过会清空。")
+        detail_lines.append("仅白名单中的命令会自动放行（同机所有 Agent 共用）；其他命令仍会确认。点跳过会移除该命令。")
     detail_lines.append(f"confirm_id={confirm_id}")
 
     # Default collapsed so the group timeline stays short after either side resolves.
