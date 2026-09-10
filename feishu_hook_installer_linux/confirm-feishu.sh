@@ -91,16 +91,16 @@ ID="$(py_json_get "$RAW" conversation_id)"
 [ -z "$ID" ] && ID="local-agent"
 WORKSPACE="$(py_json_get "$RAW" workspace_roots)"
 # Agents Window uses workspace folder name as the chat label.
-CHAT_NAME=""
-if [ -n "$WORKSPACE" ]; then
+# Prefer Agent chat title via local Cursor DB, then hook title, then workspace leaf.
+CHAT_NAME="$(py_json_get "$RAW" conversation_title)"
+[ -z "$CHAT_NAME" ] && CHAT_NAME="$(py_json_get "$RAW" title)"
+if [ -z "$CHAT_NAME" ] && [ -f "${HOOK_DIR}/resolve-chat-name.py" ]; then
+  CHAT_NAME="$(PYTHONIOENCODING=utf-8 python3 -X utf8 "${HOOK_DIR}/resolve-chat-name.py" "$ID" 2>/dev/null || true)"
+fi
+if [ -z "$CHAT_NAME" ] && [ -n "$WORKSPACE" ]; then
   CHAT_NAME="$(basename "$WORKSPACE")"
 fi
-if [ -z "$CHAT_NAME" ]; then
-  CHAT_NAME="$(py_json_get "$RAW" conversation_title)"
-fi
-if [ -z "$CHAT_NAME" ]; then
-  CHAT_NAME="$(py_json_get "$RAW" title)"
-fi
+
 DETAIL="$(py_json_get "$RAW" command)"
 [ -z "$DETAIL" ] && DETAIL="$(py_json_get "$RAW" tool_name)"
 [ -z "$DETAIL" ] && DETAIL="tool"

@@ -1,7 +1,7 @@
 ﻿"""Resolve Cursor Agent chat display name by conversation_id.
 
-Prefers the Agents Window label (workspace folder leaf via glass.*),
-then composerHeaders/composerData name, then conversation-search title.
+Prefers composerHeaders/composerData chat title, then Agents project name,
+then conversation-search title (workspace folder is last-resort in hooks).
 Prints the name to stdout. Exit 0 even when empty so callers can fall back.
 """
 from __future__ import annotations
@@ -63,7 +63,7 @@ def _basename_path(p: str) -> str:
 
 
 def from_agents_window_label(cid: str) -> str:
-    """Agents Window sidebar/header uses workspace folder name, not composer auto-title."""
+    """Agents Window project title for this conversation (not workspace folder leaf)."""
     for path in _state_vscdb_paths():
         con = _ro(path)
         if not con:
@@ -88,14 +88,14 @@ def from_agents_window_label(cid: str) -> str:
             for p in projs:
                 if not isinstance(p, dict) or p.get("id") != pid:
                     continue
+                # Prefer project/chat title shown in Agents list.
+                pname = (p.get("name") or "").strip()
+                if pname:
+                    return pname
                 ws = (p.get("workspace") or {}).get("uri") or {}
                 leaf = _basename_path(ws.get("fsPath") or "")
                 if leaf:
                     return leaf
-                # Fall back to glass project name (sometimes matches Agents list).
-                pname = (p.get("name") or "").strip()
-                if pname:
-                    return pname
         except Exception:
             pass
         finally:
@@ -162,10 +162,10 @@ def main() -> int:
     cid = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
     if not cid:
         return 0
-    # Agents Window label first, then auto-title / search title.
+    # Prefer Agent chat title (composer name), then Agents project title, then search DB.
     name = (
-        from_agents_window_label(cid)
-        or from_composer_name(cid)
+        from_composer_name(cid)
+        or from_agents_window_label(cid)
         or from_conversation_search(cid)
     )
     if name:

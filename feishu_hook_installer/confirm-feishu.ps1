@@ -81,9 +81,9 @@ if (-not $id) { $id = [string]$data.session_id }
 if (-not $id) { $id = "local-agent" }
 $workspace = ""
 if ($data.workspace_roots) { $workspace = [string]@($data.workspace_roots)[0] }
-# Agents Window labels chats by workspace folder (e.g. cursor_robot), not composer auto-title.
-$chatName = ""
-if ($workspace) { $chatName = Split-Path -Path $workspace -Leaf }
+# Prefer Agent chat title (composer name), not workspace folder leaf.
+$chatName = [string]$data.conversation_title
+if (-not $chatName) { $chatName = [string]$data.title }
 if (-not $chatName) {
     $py = Join-Path $hookDir "resolve-chat-name.py"
     $python = Get-Command python -ErrorAction SilentlyContinue
@@ -98,8 +98,7 @@ if (-not $chatName) {
         } catch {}
     }
 }
-if (-not $chatName) { $chatName = [string]$data.conversation_title }
-if (-not $chatName) { $chatName = [string]$data.title }
+if (-not $chatName -and $workspace) { $chatName = Split-Path -Path $workspace -Leaf }
 Write-Log ("confirm chat_name={0}" -f $chatName)
 
 $detail = [string]$data.command
