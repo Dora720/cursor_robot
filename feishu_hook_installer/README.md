@@ -29,6 +29,27 @@
 
 hook 脚本有更新时，在本机再跑一次 `install.cmd`，并完全退出 Cursor 后重开。
 
+## Always Run 白名单（本机永久）
+
+Always Run 加入的命令写在本机文件，**无时间限制**，同机所有 Agent / Chat 共用：
+
+`%USERPROFILE%\.cursor\hooks\always-run\shared.json`
+
+在 Cursor / VS Code 中管理：
+
+1. `Terminal` → `Run Task...`
+2. 选择 `Feishu Allowlist: List` / `Open in Editor` / `Remove Command` / `Clear All`
+
+或命令行：
+
+```powershell
+powershell -File %USERPROFILE%\.cursor\hooks\manage-allowlist.ps1 list
+powershell -File %USERPROFILE%\.cursor\hooks\manage-allowlist.ps1 open
+powershell -File %USERPROFILE%\.cursor\hooks\manage-allowlist.ps1 remove "git status"
+```
+
+「跳过」只跳过本次确认，不会从白名单删除。卸载 hook 时默认保留 `shared.json`。
+
 ## 卸载
 
 双击 `uninstall.cmd`（或运行 `uninstall-hooks.ps1`），然后完全退出 Cursor 再打开。

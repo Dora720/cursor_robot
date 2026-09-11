@@ -44,6 +44,20 @@
 ~/.cursor/hooks/notify-feishu.log
 ```
 
+## Always Run 白名单（本机永久）
+
+```text
+~/.cursor/hooks/always-run/shared.json
+```
+
+无时间限制；管理：
+
+```bash
+bash ~/.cursor/hooks/manage-allowlist.sh list
+bash ~/.cursor/hooks/manage-allowlist.sh open
+bash ~/.cursor/hooks/manage-allowlist.sh remove "git status"
+```
+
 ## 与 Windows 版的差异
 
 | 能力 | Windows 本机 | Linux Remote |

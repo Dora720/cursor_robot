@@ -111,9 +111,9 @@ function Arm-LocalAlwaysRun([string]$convId, [string]$command = "") {
         }
         Merge-LegacyAlwaysRunFiles $base $cmds
         if ($command -and ($cmds -notcontains $command)) { [void]$cmds.Add($command) }
-        $json = (@{ commands = @($cmds); scope = "machine" } | ConvertTo-Json -Compress)
+        $json = (@{ commands = @($cmds); scope = "machine"; permanent = $true } | ConvertTo-Json -Compress)
         [System.IO.File]::WriteAllText($flag, $json, [System.Text.UTF8Encoding]::new($false))
-        Write-Log ("armed local always-run scope=machine cmd=$command n=$($cmds.Count) conv=$convId")
+        Write-Log ("armed local always-run scope=machine permanent cmd=$command n=$($cmds.Count) conv=$convId")
     } catch {
         Write-Log ("arm always-run failed: {0}" -f $_.Exception.Message)
     }

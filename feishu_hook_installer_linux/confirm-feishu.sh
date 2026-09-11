@@ -221,9 +221,21 @@ seen = set(); out = []
 for c in cmds:
     if c and c not in seen:
         seen.add(c); out.append(c)
-if path and out:
+# Merge with existing local allowlist (durable; never shrink from server memory).
+existing = []
+if path and os.path.isfile(path):
+    try:
+        existing = [str(c) for c in (json.load(open(path, encoding="utf-8")).get("commands") or []) if c]
+    except Exception:
+        existing = []
+merged, seen = [], set()
+for c in existing + out:
+    if c and c not in seen:
+        seen.add(c); merged.append(c)
+if path and merged:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    open(path, "w", encoding="utf-8").write(json.dumps({"commands": out}, ensure_ascii=False))
+    open(path, "w", encoding="utf-8").write(json.dumps(
+        {"commands": merged, "scope": "machine", "permanent": True}, ensure_ascii=False))
 PY
   write_perm allow
   exit 0

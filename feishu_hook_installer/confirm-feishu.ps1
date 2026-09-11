@@ -149,16 +149,25 @@ function Test-CmdAllowlisted([string]$cmd, $commands) {
     return $false
 }
 
-function Save-AlwaysRunCommands([string]$flagPath, $commands) {
+function Save-AlwaysRunCommands([string]$flagPath, $commands, [switch]$Merge) {
     $dir = Split-Path -Parent $flagPath
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
     }
     $uniq = @()
+    if ($Merge -and (Test-Path -LiteralPath $flagPath)) {
+        foreach ($c in @(Get-AlwaysRunCommands $flagPath)) {
+            if ($c -and ($uniq -notcontains $c)) { $uniq += [string]$c }
+        }
+    }
     foreach ($c in @($commands)) {
         if ($c -and ($uniq -notcontains $c)) { $uniq += [string]$c }
     }
-    $json = (@{ commands = $uniq; scope = "machine" } | ConvertTo-Json -Compress)
+    $json = (@{
+        commands = $uniq
+        scope = "machine"
+        permanent = $true
+    } | ConvertTo-Json -Compress)
     [System.IO.File]::WriteAllText($flagPath, $json, [System.Text.UTF8Encoding]::new($false))
 }
 
@@ -219,8 +228,9 @@ if ($autoAllow) {
         if ($reqParsed.matched) { $cmds += [string]$reqParsed.matched }
         if (-not $cmds -and $detail) { $cmds = @($detail) }
         if ($cmds.Count -gt 0) {
-            Save-AlwaysRunCommands $alwaysFlag $cmds
-            Write-Log ("synced local always-run allowlist scope=machine n={0}" -f $cmds.Count)
+            # Merge only — never shrink the durable local allowlist from ephemeral server memory.
+            Save-AlwaysRunCommands $alwaysFlag $cmds -Merge
+            Write-Log ("synced local always-run allowlist scope=machine merge n={0}" -f $cmds.Count)
         }
     } catch {}
     Write-Perm "allow"

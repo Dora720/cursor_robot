@@ -13,7 +13,7 @@ foreach ($name in @(
     "notify-feishu.ps1", "notify-feishu.cmd", "ping-hook.cmd",
     "confirm-feishu.ps1", "confirm-feishu.cmd", "confirm-feishu-watch.ps1",
     "confirm-bridge.ps1", "confirm-bridge.cmd", "start-confirm-bridge.cmd",
-    "resolve-chat-name.py", "log-rotate.ps1"
+    "resolve-chat-name.py", "log-rotate.ps1", "manage-allowlist.ps1", "manage-allowlist.cmd"
 )) {
     $from = Join-Path $srcDir $name
     if (-not (Test-Path -LiteralPath $from)) {
@@ -133,9 +133,14 @@ try {
 }
 
 Write-Host ""
+Write-Host "Always Run allowlist (permanent on this PC, no time limit):"
+Write-Host "  file  : $env:USERPROFILE\.cursor\hooks\always-run\shared.json"
+Write-Host "  manage: Cursor/VS Code -> Terminal -> Run Task -> Feishu Allowlist:*"
+Write-Host "  or    : powershell -File $env:USERPROFILE\.cursor\hooks\manage-allowlist.ps1 list"
+Write-Host ""
 Write-Host "Next:"
 Write-Host "  1. Fully quit Cursor (tray icon too), reopen."
-Write-Host "  2. Confirm is peer: Feishu button OR Cursor Agent window — either works."
+Write-Host "  2. Confirm is peer: Feishu button OR Cursor Agent window - either works."
 Write-Host "  3. Keep a Run Mode that still shows Agent approval UI when hook returns ask."
 Write-Host "  4. For Remote SSH: keep this Windows install; also install feishu_hook_installer_linux on the remote host."
 Write-Host "     The local confirm-bridge clicks Agent UI when Feishu wins on Remote."

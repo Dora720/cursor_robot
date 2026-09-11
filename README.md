@@ -140,6 +140,14 @@ NOTIFY_TOKEN=<与你的 Render CURSOR_WEBHOOK_SECRET 相同>
 
 日志：`%USERPROFILE%\.cursor\hooks\notify-feishu.log`
 
+### Always Run 白名单
+
+Always Run 会把命令写入本机永久白名单（无时间限制，同机所有 Agent 共用）：  
+`%USERPROFILE%\.cursor\hooks\always-run\shared.json`
+
+在 Cursor 里：`Terminal` → `Run Task...` → `Feishu Allowlist:*`（List / Open / Remove / Clear）。  
+也可运行 `manage-allowlist.ps1`。「跳过」只跳过本次，不删白名单。
+
 Cursor 设置里搜索 Hooks，应能看到 `sessionStart`、`stop`、`beforeShellExecution`。
 
 本功能更新了 hook，**已安装过的电脑需要再跑一次 `install.cmd`**。

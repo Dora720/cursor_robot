@@ -825,13 +825,16 @@ def build_cursor_card(payload, status_label=None):
         else:
             always_lines.append("**Always Run 将加入白名单的命令：**（当前未解析到具体命令）")
         if always_existing:
-            always_lines.append("**本回合已在白名单：**")
+            always_lines.append("**本机已在白名单（长期有效）：**")
             for c in always_existing[:8]:
                 c = _safe_display_text(str(c), "")
                 if c:
                     always_lines.append(f"- `{c[:300]}`")
         always_lines.append(
-            "说明：Always Run 只自动放行白名单中的命令（同机所有 Agent 共用，跨 Chat 有效）；其他命令仍会确认。点「跳过」会从白名单移除该命令。"
+            "说明：Always Run 将命令加入**本机永久白名单**（同机所有 Agent / Chat 共用，无时间限制）；"
+            "其他命令仍会确认。「跳过」只跳过本次，不删白名单。"
+            "删除白名单：在 Cursor 运行 Task「Feishu Allowlist:*」，或编辑 "
+            "`~/.cursor/hooks/always-run/shared.json`。"
         )
         always_lines.append(
             f"向该 Chat 发消息：回复本卡片并 @机器人，或 `@机器人 发送 {chat_name or agent_id} 你的内容`"
@@ -1339,18 +1342,8 @@ def _set_confirm_decision(confirm_id, decision, agent_id="", kind="", source="")
                 key = _allowlist_scope(mach, conv)
                 bucket = always_run_allowlist.setdefault(key, set())
                 bucket.add(cmd)
-        elif decision == "deny":
-            conv = rec.get("conversation_id") or agent_id
-            mach = rec.get("machine") or ""
-            cmd = _normalize_allow_cmd(rec.get("detail") or "")
-            if cmd and (mach or conv):
-                key = _allowlist_scope(mach, conv)
-                bucket = always_run_allowlist.get(key) or set()
-                bucket.discard(cmd)
-                if not bucket:
-                    always_run_allowlist.pop(key, None)
-                else:
-                    always_run_allowlist[key] = bucket
+        # deny/Skip: only skip this confirmation — do NOT remove from machine allowlist.
+        # Users remove entries via IDE (manage-allowlist / shared.json).
 
     if applied and decision == "always":
         conv = (rec or {}).get("conversation_id") or agent_id
@@ -1398,7 +1391,7 @@ def _confirm_result_card(confirm_id, decision, applied, existing=""):
     elif decision == "allow":
         title = "已处理 - 已运行，Agent 将继续"
     elif decision == "always":
-        title = "已处理 - Always Run，已将命令加入本回合白名单"
+        title = "已处理 - Always Run，已将命令加入本机永久白名单"
     elif decision == "deny":
         title = "已处理 - 已跳过"
     else:

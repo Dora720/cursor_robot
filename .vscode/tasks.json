@@ -1,0 +1,47 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Feishu Allowlist: List",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${env:USERPROFILE}\\.cursor\\hooks\\manage-allowlist.ps1\" list",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "Feishu Allowlist: Open in Editor",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${env:USERPROFILE}\\.cursor\\hooks\\manage-allowlist.ps1\" open",
+      "problemMatcher": [],
+      "presentation": { "reveal": "silent", "panel": "shared" }
+    },
+    {
+      "label": "Feishu Allowlist: Clear All",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${env:USERPROFILE}\\.cursor\\hooks\\manage-allowlist.ps1\" clear",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "Feishu Allowlist: Remove Command",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${env:USERPROFILE}\\.cursor\\hooks\\manage-allowlist.ps1\" remove \"${input:allowlistCommand}\"",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "Feishu Allowlist: Add Command",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${env:USERPROFILE}\\.cursor\\hooks\\manage-allowlist.ps1\" add \"${input:allowlistCommand}\"",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "allowlistCommand",
+      "type": "promptString",
+      "description": "Command / pattern to add or remove from Always Run allowlist"
+    }
+  ]
+}

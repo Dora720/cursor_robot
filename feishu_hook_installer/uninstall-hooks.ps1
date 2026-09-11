@@ -51,6 +51,7 @@ $files = @(
     "confirm-bridge.ps1", "confirm-bridge.cmd", "start-confirm-bridge.cmd",
     "resolve-chat-name.py",
     "diagnose.ps1",
+    "manage-allowlist.ps1", "manage-allowlist.cmd",
     "notify-feishu.log",
     "notify.env"
 )
@@ -71,6 +72,7 @@ Get-ChildItem -Path $env:TEMP -Filter "cursor-feishu-*.json" -ErrorAction Silent
 Write-Host ""
 Write-Host "Uninstall OK"
 Write-Host "  removed hook files : $removed"
+Write-Host "  note: always-run\shared.json kept (edit/delete manually if needed)"
 Write-Host "  hooks dir          : $hookDir (kept if other files remain)"
 Write-Host ""
 Write-Host "Next:"
